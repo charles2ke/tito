@@ -254,7 +254,6 @@ class CancellationTests(unittest.TestCase):
         queue = TitoQueue(strict_order=False)
         queue.admit("g1", ["a"])
         group2 = queue.admit("g2", ["b"])
-        queue.mark_group_ready("g2")
         self.assertEqual([g.group_id for g in queue.clear()], ["g1", "g2"])
         self.assertEqual(len(queue), 0)
         self.assertNotIn("a", queue)
