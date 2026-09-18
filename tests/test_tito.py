@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from tito import Group, TitoError, TitoQueue
@@ -135,6 +136,99 @@ class TitoQueueTests(unittest.TestCase):
         queue.admit("g1", ["a"])
         queue.admit("g2", ["b"])
         self.assertEqual([g.group_id for g in queue.groups], ["g1", "g2"])
+
+
+class ReadyTrackingTests(unittest.TestCase):
+    """The queue keeps its own index of ready groups; it must stay in sync."""
+
+    def test_marking_ready_on_group_object_is_seen_by_queue(self):
+        queue = TitoQueue(strict_order=False)
+        queue.admit("g1", ["a", "b"])
+        group = queue.admit("g2", ["c"])
+        group.mark_ready("c")
+        self.assertIs(queue.release(), group)
+
+    def test_non_strict_releases_in_arrival_order_not_ready_order(self):
+        queue = TitoQueue(strict_order=False)
+        queue.admit("g1", ["a"])
+        queue.admit("g2", ["b"])
+        queue.admit("g3", ["c"])
+        queue.mark_group_ready("g3")
+        queue.mark_group_ready("g1")
+        queue.mark_group_ready("g2")
+        self.assertEqual([g.group_id for g in queue.release_all()], ["g1", "g2", "g3"])
+
+    def test_redundant_mark_ready_does_not_duplicate_release(self):
+        queue = TitoQueue(strict_order=False)
+        queue.admit("g1", ["a", "b"])
+        queue.mark_group_ready("g1")
+        queue.mark_group_ready("g1")
+        self.assertEqual([g.group_id for g in queue.release_all()], ["g1"])
+
+    def test_released_group_does_not_reenter_queue(self):
+        queue = TitoQueue(strict_order=False)
+        group = queue.admit("g1", ["a", "b"])
+        queue.mark_group_ready("g1")
+        self.assertIs(queue.release(), group)
+        group.mark_ready("a")
+        self.assertIsNone(queue.release())
+        self.assertEqual(len(queue), 0)
+
+    def test_readmitted_group_is_tracked_independently(self):
+        queue = TitoQueue(strict_order=False)
+        queue.admit("g1", ["a"])
+        queue.mark_group_ready("g1")
+        queue.release()
+        queue.admit("g1", ["a"])
+        self.assertIsNone(queue.release())
+        queue.mark_group_ready("g1")
+        self.assertEqual(queue.release().group_id, "g1")
+
+    def test_interleaved_admit_ready_release_non_strict(self):
+        queue = TitoQueue(strict_order=False)
+        queue.admit("blocked", ["x", "y"])
+        released = []
+        for i in range(5):
+            queue.admit(i, [f"m{i}"])
+            queue.mark_group_ready(i)
+            group = queue.release()
+            released.append(group.group_id)
+        self.assertEqual(released, [0, 1, 2, 3, 4])
+        self.assertEqual(len(queue), 1)
+        self.assertIsNone(queue.release())
+
+
+class ScalingTests(unittest.TestCase):
+    """Guards against the quadratic behaviour these paths used to have."""
+
+    def test_non_strict_peek_does_not_rescan_blocked_groups(self):
+        queue = TitoQueue(strict_order=False)
+        for i in range(200):
+            queue.admit(f"blocked{i}", [f"x{i}", f"y{i}"])
+        queue.admit("ready", ["r"])
+        queue.mark_group_ready("ready")
+
+        original = Group.is_ready
+        calls = []
+        Group.is_ready = property(lambda self: calls.append(1) or original.fget(self))
+        try:
+            group = queue.release()
+        finally:
+            Group.is_ready = original
+
+        self.assertEqual(group.group_id, "ready")
+        self.assertLessEqual(len(calls), 2, "peek scanned the blocked prefix")
+
+    def test_mark_ready_is_constant_time_per_member(self):
+        size = 20000
+        queue = TitoQueue()
+        queue.admit("big", range(size))
+        start = time.perf_counter()
+        for member in range(size):
+            queue.mark_ready(member)
+        elapsed = time.perf_counter() - start
+        self.assertIsNotNone(queue.release())
+        self.assertLess(elapsed, 2.0, "mark_ready appears to scale super-linearly")
 
 
 if __name__ == "__main__":

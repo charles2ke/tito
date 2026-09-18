@@ -19,8 +19,9 @@ Two ordering policies are supported:
 
 from __future__ import annotations
 
+import heapq
 from collections import OrderedDict
-from typing import Dict, Hashable, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Hashable, Iterable, List, Optional, Set, Tuple
 
 __all__ = ["Group", "TitoError", "TitoQueue"]
 
@@ -36,7 +37,7 @@ class Group:
     when, all of its members have been marked ready.
     """
 
-    __slots__ = ("group_id", "_members", "_member_set", "_ready", "sequence")
+    __slots__ = ("group_id", "_members", "_member_set", "_ready", "sequence", "_on_ready")
 
     def __init__(self, group_id: Hashable, members: Iterable[Hashable], sequence: int) -> None:
         member_list: Tuple[Hashable, ...] = tuple(members)
@@ -48,8 +49,9 @@ class Group:
         self.group_id = group_id
         self._members = member_list
         self._member_set = member_set
-        self._ready: set = set()
+        self._ready: Set[Hashable] = set()
         self.sequence = sequence
+        self._on_ready: Optional[Callable[["Group"], None]] = None
 
     @property
     def members(self) -> Tuple[Hashable, ...]:
@@ -75,8 +77,13 @@ class Group:
         """Mark ``member`` ready. Returns True if the whole group is ready."""
         if member not in self._member_set:
             raise TitoError(f"{member!r} is not a member of group {self.group_id!r}")
+        was_ready = self.is_ready
         self._ready.add(member)
-        return self.is_ready
+        if not self.is_ready:
+            return False
+        if not was_ready and self._on_ready is not None:
+            self._on_ready(self)
+        return True
 
     def __len__(self) -> int:
         return len(self._members)
@@ -85,7 +92,7 @@ class Group:
         return iter(self._members)
 
     def __contains__(self, member: Hashable) -> bool:
-        return member in self._members
+        return member in self._member_set
 
     def __repr__(self) -> str:
         return (
@@ -102,6 +109,9 @@ class TitoQueue:
         self._groups: "OrderedDict[Hashable, Group]" = OrderedDict()
         self._member_index: Dict[Hashable, Hashable] = {}
         self._sequence = 0
+        self._ready_heap: List[int] = []
+        self._ready_seqs: Set[int] = set()
+        self._ready_groups: Dict[int, Group] = {}
 
     def admit(self, group_id: Hashable, members: Iterable[Hashable]) -> Group:
         """Admit ``members`` as a single group. All of them enter together."""
@@ -115,6 +125,7 @@ class TitoQueue:
         self._groups[group_id] = group
         for member in group.members:
             self._member_index[member] = group_id
+        group._on_ready = self._note_ready
         return group
 
     def mark_ready(self, member: Hashable) -> bool:
@@ -142,11 +153,15 @@ class TitoQueue:
 
     def peek(self) -> Optional[Group]:
         """The next group that would be released, without releasing it."""
-        for group in self._groups.values():
-            if group.is_ready:
-                return group
-            if self.strict_order:
-                return None
+        if self.strict_order:
+            for group in self._groups.values():
+                return group if group.is_ready else None
+            return None
+        while self._ready_heap:
+            sequence = self._ready_heap[0]
+            if sequence in self._ready_seqs:
+                return self._ready_groups[sequence]
+            heapq.heappop(self._ready_heap)
         return None
 
     def release(self) -> Optional[Group]:
@@ -166,10 +181,22 @@ class TitoQueue:
                 return released
             released.append(group)
 
+    def _note_ready(self, group: Group) -> None:
+        """Record that ``group`` became ready, keeping arrival order."""
+        sequence = group.sequence
+        if sequence in self._ready_seqs:
+            return
+        self._ready_seqs.add(sequence)
+        self._ready_groups[sequence] = group
+        heapq.heappush(self._ready_heap, sequence)
+
     def _remove(self, group: Group) -> None:
         del self._groups[group.group_id]
         for member in group.members:
             del self._member_index[member]
+        group._on_ready = None
+        self._ready_seqs.discard(group.sequence)
+        self._ready_groups.pop(group.sequence, None)
 
     @property
     def groups(self) -> Tuple[Group, ...]:
