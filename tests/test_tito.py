@@ -113,6 +113,12 @@ class TitoQueueTests(unittest.TestCase):
         self.assertIs(queue.peek(), group)
         self.assertEqual(len(queue), 1)
 
+    def test_none_group_id_can_be_marked_ready(self):
+        queue = TitoQueue()
+        group = queue.admit(None, ["a"])
+        self.assertTrue(queue.mark_ready("a"))
+        self.assertIs(queue.release(), group)
+
     def test_release_all_empty_queue(self):
         self.assertEqual(TitoQueue().release_all(), [])
 

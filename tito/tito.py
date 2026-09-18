@@ -133,9 +133,9 @@ class TitoQueue:
 
     def group_of(self, member: Hashable) -> Optional[Group]:
         """The group a queued ``member`` belongs to, or None if not queued."""
-        group_id = self._member_index.get(member)
-        if group_id is None:
+        if member not in self._member_index:
             return None
+        group_id = self._member_index[member]
         return self._groups[group_id]
 
     def peek(self) -> Optional[Group]:
