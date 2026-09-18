@@ -226,8 +226,8 @@ class TitoQueue:
         """
         if len(self._ready_heap) <= 2 * len(self._ready_seqs) + 8:
             return
-        # A sorted list satisfies the heap invariant.
-        self._ready_heap = sorted(self._ready_seqs)
+        self._ready_heap = list(self._ready_seqs)
+        heapq.heapify(self._ready_heap)
 
     @property
     def groups(self) -> Tuple[Group, ...]:
