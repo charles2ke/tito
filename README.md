@@ -43,16 +43,58 @@ members) raise `TitoError`.
 
 ### Complexity
 
-For a group of `k` members:
+For a group of `k` members, with `n` groups waiting and `m` total queued members:
 
 - `admit()` - O(k)
-- `mark_ready()` - O(1) amortised; `mark_group_ready()` - O(k)
-- `peek()` / `release()` - O(1) amortised in both ordering modes
-- `cancel()` - O(k) amortised; `clear()` - O(n) over all queued members
+- `mark_ready()` - O(1); `mark_group_ready()` - O(k)
+- `peek()` - O(1) with `strict_order=True`, O(log n) amortised with
+  `strict_order=False`
+- `release()` - O(k) with `strict_order=True`, O(k + log n) amortised with
+  `strict_order=False`
+- `cancel()` - O(k) amortised; `clear()` - O(m)
 - `ready_members` / `waiting_members` - O(k), since they build a new tuple
 
-Groups that become ready are tracked in an arrival-ordered index, so a
-long-blocked group at the head of a non-strict queue is never rescanned.
+A strict-order queue always releases the head of the line, so it keeps no
+ready index at all - becoming ready costs nothing in time or memory. A
+non-strict queue keeps ready groups in an arrival-ordered heap, so a
+long-blocked group at the head is never rescanned, and stale entries are
+compacted away so the heap cannot grow without bound.
+
+Each group stores its members once in admission order plus one hash table
+carrying the per-member ready flag, so a fully ready group does not hold a
+second copy of its membership. `TitoQueue` and `Group` both use `__slots__`.
+
+### Immutability
+
+`TitoQueue.strict_order` and `Group.sequence` are read-only: both select how
+the queue indexes groups, so changing them after admission would corrupt the
+release order.
+
+### Thread safety
+
+`TitoQueue` and `Group` are thread-safe. Every public operation is atomic, so
+concurrent producers and consumers can share one queue without external
+locking:
+
+- exactly one caller ever receives a given group from `release()`, `cancel()`,
+  `clear()` or `release_all()`;
+- concurrent `mark_ready()` calls count each member once and notify the queue
+  once, even when several threads complete the same group;
+- concurrent `admit()` calls get distinct, arrival-ordered sequence numbers,
+  and duplicate group ids or members are still rejected.
+
+A queue and the groups it has admitted share one reentrant lock, so marking a
+member ready and the queue bookkeeping it triggers are a single atomic step.
+A group keeps that shared lock after it departs, so calls on a released group
+briefly contend with its former queue.
+
+Compound read-then-act sequences are not atomic as a whole: `peek()` followed
+by `release()` may observe different groups. Use `release()` directly, or hold
+your own lock around the sequence.
+
+## Requirements
+
+Python 3.9 or newer. No third-party dependencies.
 
 ## Tests
 
