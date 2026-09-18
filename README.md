@@ -34,6 +34,8 @@ queue.release()                   # Group(group_id='party-1', ...)
 - `admit(group_id, members)` - admit a group; members enter together.
 - `mark_ready(member)` / `mark_group_ready(group_id)` - signal readiness.
 - `peek()` / `release()` / `release_all()` - inspect or release departing groups.
+- `cancel(group_id)` / `clear()` - withdraw waiting groups without releasing
+  them; a cancelled group still leaves as a whole.
 - `group_of(member)`, `groups`, `len(queue)`, `member in queue` - inspection.
 
 Invalid operations (empty groups, duplicate group ids or members, unknown
@@ -46,6 +48,7 @@ For a group of `k` members:
 - `admit()` - O(k)
 - `mark_ready()` - O(1) amortised; `mark_group_ready()` - O(k)
 - `peek()` / `release()` - O(1) amortised in both ordering modes
+- `cancel()` - O(k) amortised; `clear()` - O(n) over all queued members
 - `ready_members` / `waiting_members` - O(k), since they build a new tuple
 
 Groups that become ready are tracked in an arrival-ordered index, so a
