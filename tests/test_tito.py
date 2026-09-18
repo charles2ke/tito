@@ -200,6 +200,72 @@ class ReadyTrackingTests(unittest.TestCase):
         self.assertIsNone(queue.release())
 
 
+class CancellationTests(unittest.TestCase):
+    """Cancelling withdraws a whole group without releasing it."""
+
+    def test_cancel_removes_group_and_members(self):
+        queue = TitoQueue()
+        group = queue.admit("g1", ["a", "b"])
+        self.assertIs(queue.cancel("g1"), group)
+        self.assertEqual(len(queue), 0)
+        self.assertNotIn("a", queue)
+        self.assertIsNone(queue.group_of("b"))
+
+    def test_cancel_unknown_group(self):
+        queue = TitoQueue()
+        with self.assertRaises(TitoError):
+            queue.cancel("nope")
+
+    def test_cancel_unblocks_strict_head(self):
+        queue = TitoQueue(strict_order=True)
+        queue.admit("g1", ["a", "b"])
+        queue.admit("g2", ["c"])
+        queue.mark_group_ready("g2")
+        self.assertIsNone(queue.release())
+        queue.cancel("g1")
+        self.assertEqual(queue.release().group_id, "g2")
+
+    def test_cancelled_ready_group_does_not_reappear(self):
+        queue = TitoQueue(strict_order=False)
+        queue.admit("g1", ["a"])
+        queue.mark_group_ready("g1")
+        queue.cancel("g1")
+        self.assertIsNone(queue.release())
+        self.assertEqual(len(queue._ready_seqs), 0)
+
+    def test_cancelled_group_can_be_readmitted(self):
+        queue = TitoQueue()
+        queue.admit("g1", ["a"])
+        queue.cancel("g1")
+        queue.admit("g1", ["a"])
+        self.assertIn("a", queue)
+        self.assertIsNone(queue.release())
+
+    def test_cancelled_group_does_not_notify_queue(self):
+        queue = TitoQueue(strict_order=False)
+        group = queue.admit("g1", ["a", "b"])
+        queue.cancel("g1")
+        group.mark_ready("a")
+        group.mark_ready("b")
+        self.assertIsNone(queue.release())
+        self.assertEqual(len(queue._ready_seqs), 0)
+
+    def test_clear_returns_groups_in_arrival_order(self):
+        queue = TitoQueue(strict_order=False)
+        queue.admit("g1", ["a"])
+        group2 = queue.admit("g2", ["b"])
+        queue.mark_group_ready("g2")
+        self.assertEqual([g.group_id for g in queue.clear()], ["g1", "g2"])
+        self.assertEqual(len(queue), 0)
+        self.assertNotIn("a", queue)
+        self.assertIsNone(queue.release())
+        group2.mark_ready("b")
+        self.assertIsNone(queue.release())
+
+    def test_clear_empty_queue(self):
+        self.assertEqual(TitoQueue().clear(), [])
+
+
 class ScalingTests(unittest.TestCase):
     """Guards against the quadratic behaviour these paths used to have."""
 

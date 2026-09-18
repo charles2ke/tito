@@ -168,12 +168,37 @@ class TitoQueue:
         group_id = self._member_index[member]
         return self._groups[group_id]
 
+    def cancel(self, group_id: Hashable) -> Group:
+        """Withdraw a waiting group from the queue and return it.
+
+        The whole group leaves together, ready or not: cancelling is the only
+        way a group departs without every member being ready.
+        """
+        group = self._groups.get(group_id)
+        if group is None:
+            raise TitoError(f"group {group_id!r} is not in the queue")
+        self._remove(group)
+        return group
+
+    def clear(self) -> List[Group]:
+        """Withdraw every waiting group, in arrival order, and return them."""
+        cleared = list(self._groups.values())
+        for group in cleared:
+            group._on_ready = None
+        self._groups.clear()
+        self._member_index.clear()
+        self._ready_seqs.clear()
+        self._ready_groups.clear()
+        self._ready_heap.clear()
+        return cleared
+
     def peek(self) -> Optional[Group]:
         """The next group that would be released, without releasing it."""
         if self.strict_order:
-            for group in self._groups.values():
-                return group if group.is_ready else None
-            return None
+            head = next(iter(self._groups.values()), None)
+            if head is None or not head.is_ready:
+                return None
+            return head
         while self._ready_heap:
             sequence = self._ready_heap[0]
             if sequence in self._ready_seqs:
