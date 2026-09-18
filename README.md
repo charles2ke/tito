@@ -43,16 +43,37 @@ members) raise `TitoError`.
 
 ### Complexity
 
-For a group of `k` members:
+For a group of `k` members, with `n` groups waiting:
 
 - `admit()` - O(k)
-- `mark_ready()` - O(1) amortised; `mark_group_ready()` - O(k)
-- `peek()` / `release()` - O(1) amortised in both ordering modes
-- `cancel()` - O(k) amortised; `clear()` - O(n) over all queued members
+- `mark_ready()` - O(1); `mark_group_ready()` - O(k)
+- `peek()` / `release()` - O(1) with `strict_order=True`, O(log n) amortised
+  with `strict_order=False`
+- `cancel()` - O(k) amortised; `clear()` - O(n) over all queued groups
 - `ready_members` / `waiting_members` - O(k), since they build a new tuple
 
-Groups that become ready are tracked in an arrival-ordered index, so a
-long-blocked group at the head of a non-strict queue is never rescanned.
+A strict-order queue always releases the head of the line, so it keeps no
+ready index at all - becoming ready costs nothing in time or memory. A
+non-strict queue keeps ready groups in an arrival-ordered heap, so a
+long-blocked group at the head is never rescanned, and stale entries are
+compacted away so the heap cannot grow without bound.
+
+Each group stores its members once in admission order plus one hash table
+carrying the per-member ready flag, so a fully ready group does not hold a
+second copy of its membership. `TitoQueue` and `Group` both use `__slots__`.
+
+### Immutability and threading
+
+`TitoQueue.strict_order` and `Group.sequence` are read-only: both select how
+the queue indexes groups, so changing them after admission would corrupt the
+release order.
+
+`TitoQueue` is not thread-safe. Guard a shared queue with your own lock, or
+give each worker its own queue.
+
+## Requirements
+
+Python 3.9 or newer. No third-party dependencies.
 
 ## Tests
 

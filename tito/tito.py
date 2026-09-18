@@ -22,7 +22,7 @@ from __future__ import annotations
 import heapq
 import weakref
 from collections import OrderedDict
-from typing import Callable, Dict, Hashable, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Hashable, Iterable, Iterator, List, Optional, Tuple
 
 __all__ = ["Group", "TitoError", "TitoQueue"]
 
@@ -38,21 +38,29 @@ class Group:
     when, all of its members have been marked ready.
     """
 
-    __slots__ = ("group_id", "_members", "_member_set", "_ready", "sequence", "_on_ready")
+    __slots__ = ("group_id", "_members", "_ready", "_ready_count", "_sequence", "_on_ready")
 
     def __init__(self, group_id: Hashable, members: Iterable[Hashable], sequence: int) -> None:
         member_list: Tuple[Hashable, ...] = tuple(members)
         if not member_list:
             raise TitoError(f"group {group_id!r} must contain at least one member")
-        member_set = set(member_list)
-        if len(member_set) != len(member_list):
+        # One dict replaces the former "all members" set plus "ready members"
+        # set: it answers membership in O(1) and carries the ready flag in the
+        # same slot, so a fully ready group no longer stores every member twice.
+        ready: Dict[Hashable, bool] = dict.fromkeys(member_list, False)
+        if len(ready) != len(member_list):
             raise TitoError(f"group {group_id!r} contains duplicate members")
         self.group_id = group_id
         self._members = member_list
-        self._member_set = member_set
-        self._ready: Set[Hashable] = set()
-        self.sequence = sequence
+        self._ready = ready
+        self._ready_count = 0
+        self._sequence = sequence
         self._on_ready: Optional[Callable[["Group"], None]] = None
+
+    @property
+    def sequence(self) -> int:
+        """Arrival order of this group. Read-only: the queue indexes on it."""
+        return self._sequence
 
     @property
     def members(self) -> Tuple[Hashable, ...]:
@@ -62,43 +70,59 @@ class Group:
     @property
     def ready_members(self) -> Tuple[Hashable, ...]:
         """Members already marked ready, in admission order."""
-        return tuple(m for m in self._members if m in self._ready)
+        ready = self._ready
+        return tuple(m for m in self._members if ready[m])
 
     @property
     def waiting_members(self) -> Tuple[Hashable, ...]:
         """Members not yet marked ready, in admission order."""
-        return tuple(m for m in self._members if m not in self._ready)
+        ready = self._ready
+        return tuple(m for m in self._members if not ready[m])
+
+    @property
+    def ready_count(self) -> int:
+        """How many members have been marked ready."""
+        return self._ready_count
 
     @property
     def is_ready(self) -> bool:
         """True once every member of the group is ready to depart."""
-        return len(self._ready) == len(self._members)
+        return self._ready_count == len(self._members)
 
     def mark_ready(self, member: Hashable) -> bool:
         """Mark ``member`` ready. Returns True if the whole group is ready."""
-        if member not in self._member_set:
-            raise TitoError(f"{member!r} is not a member of group {self.group_id!r}")
-        was_ready = self.is_ready
-        self._ready.add(member)
-        if not self.is_ready:
+        try:
+            already = self._ready[member]
+        except KeyError:
+            raise TitoError(f"{member!r} is not a member of group {self.group_id!r}") from None
+        except TypeError:
+            raise TitoError(f"{member!r} is not a member of group {self.group_id!r}") from None
+        if already:
+            return self.is_ready
+        self._ready[member] = True
+        self._ready_count += 1
+        if self._ready_count != len(self._members):
             return False
-        if not was_ready and self._on_ready is not None:
+        if self._on_ready is not None:
             self._on_ready(self)
         return True
 
     def __len__(self) -> int:
         return len(self._members)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Hashable]:
         return iter(self._members)
 
     def __contains__(self, member: Hashable) -> bool:
-        return member in self._member_set
+        try:
+            return member in self._ready
+        except TypeError:
+            return False
 
     def __repr__(self) -> str:
         return (
             f"Group(group_id={self.group_id!r}, members={list(self._members)!r}, "
-            f"ready={len(self._ready)}/{len(self._members)})"
+            f"ready={self._ready_count}/{len(self._members)})"
         )
 
 
@@ -117,31 +141,52 @@ def _make_ready_callback(queue: "TitoQueue") -> Callable[["Group"], None]:
 class TitoQueue:
     """A queue that admits and releases members group-by-group."""
 
+    __slots__ = (
+        "_strict_order",
+        "_groups",
+        "_member_index",
+        "_sequence",
+        "_ready_heap",
+        "_ready_groups",
+        "_on_ready_callback",
+        "__weakref__",
+    )
+
     def __init__(self, strict_order: bool = True) -> None:
-        self.strict_order = strict_order
+        self._strict_order = bool(strict_order)
         self._groups: "OrderedDict[Hashable, Group]" = OrderedDict()
         self._member_index: Dict[Hashable, Hashable] = {}
         self._sequence = 0
+        # Only the non-strict policy needs a ready index: strict order always
+        # releases the head of the queue, so tracking which younger groups are
+        # ready would cost time and memory for information never read.
         self._ready_heap: List[int] = []
-        self._ready_seqs: Set[int] = set()
         self._ready_groups: Dict[int, Group] = {}
         # Groups hold this callback, so it must not hold a strong reference
         # back to the queue: that cycle would keep released queues (and every
         # group still in them) alive until the cyclic collector runs.
-        self._on_ready_callback = _make_ready_callback(self)
+        self._on_ready_callback: Optional[Callable[[Group], None]] = (
+            None if self._strict_order else _make_ready_callback(self)
+        )
+
+    @property
+    def strict_order(self) -> bool:
+        """The ordering policy. Read-only: it selects the indexing strategy."""
+        return self._strict_order
 
     def admit(self, group_id: Hashable, members: Iterable[Hashable]) -> Group:
         """Admit ``members`` as a single group. All of them enter together."""
         if group_id in self._groups:
             raise TitoError(f"group {group_id!r} is already in the queue")
         group = Group(group_id, members, self._sequence)
-        already_queued = [m for m in group.members if m in self._member_index]
+        member_index = self._member_index
+        already_queued = [m for m in group.members if m in member_index]
         if already_queued:
             raise TitoError(f"members already in the queue: {already_queued!r}")
         self._sequence += 1
         self._groups[group_id] = group
         for member in group.members:
-            self._member_index[member] = group_id
+            member_index[member] = group_id
         group._on_ready = self._on_ready_callback
         return group
 
@@ -163,9 +208,12 @@ class TitoQueue:
 
     def group_of(self, member: Hashable) -> Optional[Group]:
         """The group a queued ``member`` belongs to, or None if not queued."""
-        if member not in self._member_index:
+        try:
+            group_id = self._member_index[member]
+        except KeyError:
             return None
-        group_id = self._member_index[member]
+        except TypeError:
+            return None
         return self._groups[group_id]
 
     def cancel(self, group_id: Hashable) -> Group:
@@ -187,23 +235,24 @@ class TitoQueue:
             group._on_ready = None
         self._groups.clear()
         self._member_index.clear()
-        self._ready_seqs.clear()
         self._ready_groups.clear()
         self._ready_heap.clear()
         return cleared
 
     def peek(self) -> Optional[Group]:
         """The next group that would be released, without releasing it."""
-        if self.strict_order:
+        if self._strict_order:
             head = next(iter(self._groups.values()), None)
             if head is None or not head.is_ready:
                 return None
             return head
-        while self._ready_heap:
-            sequence = self._ready_heap[0]
-            if sequence in self._ready_seqs:
-                return self._ready_groups[sequence]
-            heapq.heappop(self._ready_heap)
+        heap = self._ready_heap
+        ready_groups = self._ready_groups
+        while heap:
+            group = ready_groups.get(heap[0])
+            if group is not None:
+                return group
+            heapq.heappop(heap)
         return None
 
     def release(self) -> Optional[Group]:
@@ -226,32 +275,30 @@ class TitoQueue:
     def _note_ready(self, group: Group) -> None:
         """Record that ``group`` became ready, keeping arrival order."""
         sequence = group.sequence
-        if sequence in self._ready_seqs:
+        if sequence in self._ready_groups:
             return
-        self._ready_seqs.add(sequence)
         self._ready_groups[sequence] = group
         heapq.heappush(self._ready_heap, sequence)
 
     def _remove(self, group: Group) -> None:
         del self._groups[group.group_id]
+        member_index = self._member_index
         for member in group.members:
-            del self._member_index[member]
+            del member_index[member]
         group._on_ready = None
-        self._ready_seqs.discard(group.sequence)
-        self._ready_groups.pop(group.sequence, None)
-        self._compact_ready_heap()
+        if self._ready_groups.pop(group.sequence, None) is not None:
+            self._compact_ready_heap()
 
     def _compact_ready_heap(self) -> None:
         """Drop stale sequences so the ready heap cannot grow without bound.
 
         ``peek`` only discards stale entries once they reach the top of the
-        heap, and in strict-order mode it never touches the heap at all, so
-        departed groups would otherwise leave their sequence numbers behind
-        forever.
+        heap, so departed groups would otherwise leave their sequence numbers
+        behind forever.
         """
-        if len(self._ready_heap) <= 2 * len(self._ready_seqs) + 8:
+        if len(self._ready_heap) <= 2 * len(self._ready_groups) + 8:
             return
-        self._ready_heap = list(self._ready_seqs)
+        self._ready_heap = list(self._ready_groups)
         heapq.heapify(self._ready_heap)
 
     @property
@@ -264,7 +311,10 @@ class TitoQueue:
         return len(self._groups)
 
     def __contains__(self, member: Hashable) -> bool:
-        return member in self._member_index
+        try:
+            return member in self._member_index
+        except TypeError:
+            return False
 
     def __repr__(self) -> str:
-        return f"TitoQueue(strict_order={self.strict_order}, groups={len(self._groups)})"
+        return f"TitoQueue(strict_order={self._strict_order}, groups={len(self._groups)})"

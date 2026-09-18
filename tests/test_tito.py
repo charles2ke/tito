@@ -200,6 +200,62 @@ class ReadyTrackingTests(unittest.TestCase):
         self.assertIsNone(queue.release())
 
 
+class HardeningTests(unittest.TestCase):
+    """Invariants that keep a long-running queue consistent."""
+
+    def test_strict_order_is_read_only(self):
+        queue = TitoQueue(strict_order=True)
+        with self.assertRaises(AttributeError):
+            queue.strict_order = False
+        self.assertTrue(queue.strict_order)
+
+    def test_group_sequence_is_read_only(self):
+        group = Group("g", ["a"], 7)
+        self.assertEqual(group.sequence, 7)
+        with self.assertRaises(AttributeError):
+            group.sequence = 0
+
+    def test_unhashable_member_lookups_do_not_raise_type_error(self):
+        queue = TitoQueue()
+        group = queue.admit("g", ["a"])
+        self.assertNotIn(["unhashable"], queue)
+        self.assertNotIn(["unhashable"], group)
+        self.assertIsNone(queue.group_of(["unhashable"]))
+        with self.assertRaises(TitoError):
+            queue.mark_ready(["unhashable"])
+        with self.assertRaises(TitoError):
+            group.mark_ready(["unhashable"])
+
+    def test_ready_count_tracks_marked_members(self):
+        group = Group("g", ["a", "b"], 0)
+        self.assertEqual(group.ready_count, 0)
+        group.mark_ready("a")
+        group.mark_ready("a")
+        self.assertEqual(group.ready_count, 1)
+        group.mark_ready("b")
+        self.assertEqual(group.ready_count, 2)
+        self.assertIn("ready=2/2", repr(group))
+
+    def test_repeat_mark_ready_reports_group_state(self):
+        group = Group("g", ["a", "b"], 0)
+        group.mark_ready("a")
+        self.assertFalse(group.mark_ready("a"))
+        group.mark_ready("b")
+        self.assertTrue(group.mark_ready("a"))
+
+    def test_strict_queue_keeps_no_ready_index(self):
+        queue = TitoQueue(strict_order=True)
+        queue.admit("g1", ["a"])
+        queue.mark_group_ready("g1")
+        self.assertEqual(len(queue._ready_groups), 0)
+        self.assertEqual(len(queue._ready_heap), 0)
+        self.assertEqual(queue.release().group_id, "g1")
+
+    def test_queue_has_no_instance_dict(self):
+        self.assertFalse(hasattr(TitoQueue(), "__dict__"))
+        self.assertFalse(hasattr(Group("g", ["a"], 0), "__dict__"))
+
+
 class CancellationTests(unittest.TestCase):
     """Cancelling withdraws a whole group without releasing it."""
 
@@ -231,7 +287,7 @@ class CancellationTests(unittest.TestCase):
         queue.mark_group_ready("g1")
         queue.cancel("g1")
         self.assertIsNone(queue.release())
-        self.assertEqual(len(queue._ready_seqs), 0)
+        self.assertEqual(len(queue._ready_groups), 0)
 
     def test_cancelled_group_can_be_readmitted(self):
         queue = TitoQueue()
@@ -248,7 +304,7 @@ class CancellationTests(unittest.TestCase):
         group.mark_ready("a")
         group.mark_ready("b")
         self.assertIsNone(queue.release())
-        self.assertEqual(len(queue._ready_seqs), 0)
+        self.assertEqual(len(queue._ready_groups), 0)
 
     def test_clear_returns_groups_in_arrival_order(self):
         queue = TitoQueue(strict_order=False)
@@ -312,7 +368,7 @@ class MemoryTests(unittest.TestCase):
         self._churn(queue, 5000)
         self.assertEqual(len(queue), 0)
         self.assertLess(len(queue._ready_heap), 100)
-        self.assertEqual(len(queue._ready_seqs), 0)
+        self.assertEqual(len(queue._ready_groups), 0)
         self.assertEqual(len(queue._ready_groups), 0)
         self.assertEqual(len(queue._member_index), 0)
 
