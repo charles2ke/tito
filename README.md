@@ -48,7 +48,7 @@ For a group of `k` members:
 - `admit()` - O(k)
 - `mark_ready()` - O(1) amortised; `mark_group_ready()` - O(k)
 - `peek()` / `release()` - O(1) amortised in both ordering modes
-- `cancel()` - O(k); `clear()` - O(n) over all queued members
+- `cancel()` - O(k) amortised; `clear()` - O(n) over all queued members
 - `ready_members` / `waiting_members` - O(k), since they build a new tuple
 
 Groups that become ready are tracked in an arrival-ordered index, so a
