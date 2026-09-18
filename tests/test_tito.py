@@ -1,4 +1,5 @@
 import gc
+import threading
 import time
 import unittest
 import weakref
@@ -254,6 +255,157 @@ class HardeningTests(unittest.TestCase):
     def test_queue_has_no_instance_dict(self):
         self.assertFalse(hasattr(TitoQueue(), "__dict__"))
         self.assertFalse(hasattr(Group("g", ["a"], 0), "__dict__"))
+
+
+class ThreadSafetyTests(unittest.TestCase):
+    """Concurrent callers must never corrupt or double-release a group."""
+
+    def _run(self, workers):
+        errors = []
+        barrier = threading.Barrier(len(workers))
+
+        def target(fn):
+            try:
+                barrier.wait()
+                fn()
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=target, args=(fn,)) for fn in workers]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+
+    def test_shares_lock_with_admitted_groups(self):
+        queue = TitoQueue()
+        group = queue.admit("g1", ["a"])
+        self.assertIs(group._lock, queue._lock)
+
+    def test_standalone_group_has_its_own_lock(self):
+        self.assertIsNot(Group("g", ["a"], 0)._lock, Group("g", ["a"], 0)._lock)
+
+    def test_concurrent_mark_ready_counts_each_member_once(self):
+        size = 500
+        queue = TitoQueue()
+        group = queue.admit("big", range(size))
+        halves = [range(0, size), range(size - 1, -1, -1)]
+        self._run([
+            (lambda members=members: [queue.mark_ready(m) for m in members])
+            for members in halves
+        ])
+        self.assertEqual(group.ready_count, size)
+        self.assertIs(queue.release(), group)
+        self.assertEqual(len(queue), 0)
+
+    def test_concurrent_release_never_hands_out_a_group_twice(self):
+        count = 300
+        for strict in (True, False):
+            with self.subTest(strict_order=strict):
+                queue = TitoQueue(strict_order=strict)
+                for i in range(count):
+                    queue.admit(i, [f"m{i}-{strict}"])
+                    queue.mark_group_ready(i)
+                seen = []
+                lock = threading.Lock()
+
+                def drain():
+                    while True:
+                        group = queue.release()
+                        if group is None:
+                            return
+                        with lock:
+                            seen.append(group.group_id)
+
+                self._run([drain] * 4)
+                self.assertEqual(sorted(seen), list(range(count)))
+                self.assertEqual(len(queue), 0)
+
+    def test_concurrent_admit_assigns_unique_sequences(self):
+        queue = TitoQueue(strict_order=False)
+        per_thread = 200
+        threads = 4
+
+        def admit(offset):
+            for i in range(per_thread):
+                queue.admit((offset, i), [f"m{offset}-{i}"])
+
+        self._run([lambda o=o: admit(o) for o in range(threads)])
+        sequences = [g.sequence for g in queue.groups]
+        self.assertEqual(len(set(sequences)), per_thread * threads)
+        self.assertEqual(sequences, sorted(sequences))
+
+    def test_concurrent_admit_rejects_duplicate_group_ids(self):
+        queue = TitoQueue()
+        wins = []
+        lock = threading.Lock()
+
+        def admit():
+            try:
+                queue.admit("same", [threading.get_ident()])
+            except TitoError:
+                return
+            with lock:
+                wins.append(1)
+
+        self._run([admit] * 8)
+        self.assertEqual(len(wins), 1)
+        self.assertEqual(len(queue), 1)
+
+    def test_producers_and_consumers_release_every_group(self):
+        queue = TitoQueue(strict_order=False)
+        total = 400
+        produced = threading.Event()
+        seen = []
+        lock = threading.Lock()
+
+        def produce():
+            for i in range(total):
+                queue.admit(i, [f"p{i}"])
+                queue.mark_group_ready(i)
+            produced.set()
+
+        def consume():
+            while True:
+                for group in queue.release_all():
+                    with lock:
+                        seen.append(group.group_id)
+                if produced.is_set() and len(queue) == 0:
+                    return
+
+        self._run([produce, consume, consume])
+        self.assertEqual(sorted(seen), list(range(total)))
+
+    def test_cancel_and_release_do_not_both_claim_a_group(self):
+        queue = TitoQueue(strict_order=False)
+        count = 200
+        for i in range(count):
+            queue.admit(i, [f"c{i}"])
+            queue.mark_group_ready(i)
+        claimed = []
+        lock = threading.Lock()
+
+        def cancel_all():
+            for i in range(count):
+                try:
+                    group = queue.cancel(i)
+                except TitoError:
+                    continue
+                with lock:
+                    claimed.append(group.group_id)
+
+        def release_all():
+            while len(queue):
+                for group in queue.release_all():
+                    with lock:
+                        claimed.append(group.group_id)
+
+        self._run([cancel_all, release_all])
+        self.assertEqual(sorted(claimed), list(range(count)))
+        self.assertEqual(len(queue), 0)
+        self.assertEqual(len(queue._member_index), 0)
+        self.assertEqual(len(queue._ready_groups), 0)
 
 
 class CancellationTests(unittest.TestCase):

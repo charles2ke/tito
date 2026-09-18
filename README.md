@@ -62,14 +62,33 @@ Each group stores its members once in admission order plus one hash table
 carrying the per-member ready flag, so a fully ready group does not hold a
 second copy of its membership. `TitoQueue` and `Group` both use `__slots__`.
 
-### Immutability and threading
+### Immutability
 
 `TitoQueue.strict_order` and `Group.sequence` are read-only: both select how
 the queue indexes groups, so changing them after admission would corrupt the
 release order.
 
-`TitoQueue` is not thread-safe. Guard a shared queue with your own lock, or
-give each worker its own queue.
+### Thread safety
+
+`TitoQueue` and `Group` are thread-safe. Every public operation is atomic, so
+concurrent producers and consumers can share one queue without external
+locking:
+
+- exactly one caller ever receives a given group from `release()`, `cancel()`,
+  `clear()` or `release_all()`;
+- concurrent `mark_ready()` calls count each member once and notify the queue
+  once, even when several threads complete the same group;
+- concurrent `admit()` calls get distinct, arrival-ordered sequence numbers,
+  and duplicate group ids or members are still rejected.
+
+A queue and the groups it has admitted share one reentrant lock, so marking a
+member ready and the queue bookkeeping it triggers are a single atomic step.
+A group keeps that shared lock after it departs, so calls on a released group
+briefly contend with its former queue.
+
+Compound read-then-act sequences are not atomic as a whole: `peek()` followed
+by `release()` may observe different groups. Use `release()` directly, or hold
+your own lock around the sequence.
 
 ## Requirements
 
