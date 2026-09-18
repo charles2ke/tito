@@ -43,7 +43,7 @@ members) raise `TitoError`.
 
 ### Complexity
 
-For a group of `k` members, with `n` groups waiting:
+For a group of `k` members, with `n` groups waiting and `m` total queued members:
 
 - `admit()` - O(k)
 - `mark_ready()` - O(1); `mark_group_ready()` - O(k)
@@ -51,7 +51,7 @@ For a group of `k` members, with `n` groups waiting:
   `strict_order=False`
 - `release()` - O(k) with `strict_order=True`, O(k + log n) amortised with
   `strict_order=False`
-- `cancel()` - O(k) amortised; `clear()` - O(n) over all queued groups
+- `cancel()` - O(k) amortised; `clear()` - O(m)
 - `ready_members` / `waiting_members` - O(k), since they build a new tuple
 
 A strict-order queue always releases the head of the line, so it keeps no
