@@ -47,8 +47,10 @@ For a group of `k` members, with `n` groups waiting:
 
 - `admit()` - O(k)
 - `mark_ready()` - O(1); `mark_group_ready()` - O(k)
-- `peek()` / `release()` - O(1) with `strict_order=True`, O(log n) amortised
-  with `strict_order=False`
+- `peek()` - O(1) with `strict_order=True`, O(log n) amortised with
+  `strict_order=False`
+- `release()` - O(k) with `strict_order=True`, O(k + log n) amortised with
+  `strict_order=False`
 - `cancel()` - O(k) amortised; `clear()` - O(n) over all queued groups
 - `ready_members` / `waiting_members` - O(k), since they build a new tuple
 
