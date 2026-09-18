@@ -36,16 +36,18 @@ class Group:
     when, all of its members have been marked ready.
     """
 
-    __slots__ = ("group_id", "_members", "_ready", "sequence")
+    __slots__ = ("group_id", "_members", "_member_set", "_ready", "sequence")
 
     def __init__(self, group_id: Hashable, members: Iterable[Hashable], sequence: int) -> None:
         member_list: Tuple[Hashable, ...] = tuple(members)
         if not member_list:
             raise TitoError(f"group {group_id!r} must contain at least one member")
-        if len(set(member_list)) != len(member_list):
+        member_set = set(member_list)
+        if len(member_set) != len(member_list):
             raise TitoError(f"group {group_id!r} contains duplicate members")
         self.group_id = group_id
         self._members = member_list
+        self._member_set = member_set
         self._ready: set = set()
         self.sequence = sequence
 
@@ -71,7 +73,7 @@ class Group:
 
     def mark_ready(self, member: Hashable) -> bool:
         """Mark ``member`` ready. Returns True if the whole group is ready."""
-        if member not in set(self._members):
+        if member not in self._member_set:
             raise TitoError(f"{member!r} is not a member of group {self.group_id!r}")
         self._ready.add(member)
         return self.is_ready
