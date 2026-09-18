@@ -1,5 +1,7 @@
+import gc
 import time
 import unittest
+import weakref
 
 from tito import Group, TitoError, TitoQueue
 
@@ -229,6 +231,52 @@ class ScalingTests(unittest.TestCase):
         elapsed = time.perf_counter() - start
         self.assertIsNotNone(queue.release())
         self.assertLess(elapsed, 2.0, "mark_ready appears to scale super-linearly")
+
+
+class MemoryTests(unittest.TestCase):
+    """Long-lived queues must not accumulate state for departed groups."""
+
+    def _churn(self, queue, count):
+        for i in range(count):
+            queue.admit(i, [f"m{i}"])
+            queue.mark_group_ready(i)
+            queue.release()
+
+    def test_strict_order_churn_does_not_grow_ready_heap(self):
+        queue = TitoQueue(strict_order=True)
+        self._churn(queue, 5000)
+        self.assertEqual(len(queue), 0)
+        self.assertLess(len(queue._ready_heap), 100)
+        self.assertEqual(len(queue._ready_seqs), 0)
+        self.assertEqual(len(queue._ready_groups), 0)
+        self.assertEqual(len(queue._member_index), 0)
+
+    def test_non_strict_churn_does_not_grow_ready_heap(self):
+        queue = TitoQueue(strict_order=False)
+        queue.admit("blocked", ["x", "y"])
+        self._churn(queue, 5000)
+        self.assertEqual(len(queue), 1)
+        self.assertLess(len(queue._ready_heap), 100)
+
+    def test_queue_is_not_kept_alive_by_its_groups(self):
+        gc.disable()
+        try:
+            queue = TitoQueue()
+            queue.admit("g1", ["a", "b"])
+            ref = weakref.ref(queue)
+            del queue
+            self.assertIsNone(ref(), "queue leaked through a reference cycle")
+        finally:
+            gc.enable()
+
+    def test_released_group_still_reports_ready(self):
+        queue = TitoQueue()
+        group = queue.admit("g1", ["a", "b"])
+        queue.mark_ready("a")
+        self.assertIs(queue.release(), None)
+        queue.mark_ready("b")
+        self.assertIs(queue.release(), group)
+        self.assertTrue(group.is_ready)
 
 
 if __name__ == "__main__":

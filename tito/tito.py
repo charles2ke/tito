@@ -20,6 +20,7 @@ Two ordering policies are supported:
 from __future__ import annotations
 
 import heapq
+import weakref
 from collections import OrderedDict
 from typing import Callable, Dict, Hashable, Iterable, List, Optional, Set, Tuple
 
@@ -101,6 +102,18 @@ class Group:
         )
 
 
+def _make_ready_callback(queue: "TitoQueue") -> Callable[["Group"], None]:
+    """Build a group callback that only weakly references ``queue``."""
+    queue_ref = weakref.ref(queue)
+
+    def on_ready(group: "Group") -> None:
+        owner = queue_ref()
+        if owner is not None:
+            owner._note_ready(group)
+
+    return on_ready
+
+
 class TitoQueue:
     """A queue that admits and releases members group-by-group."""
 
@@ -112,6 +125,10 @@ class TitoQueue:
         self._ready_heap: List[int] = []
         self._ready_seqs: Set[int] = set()
         self._ready_groups: Dict[int, Group] = {}
+        # Groups hold this callback, so it must not hold a strong reference
+        # back to the queue: that cycle would keep released queues (and every
+        # group still in them) alive until the cyclic collector runs.
+        self._on_ready_callback = _make_ready_callback(self)
 
     def admit(self, group_id: Hashable, members: Iterable[Hashable]) -> Group:
         """Admit ``members`` as a single group. All of them enter together."""
@@ -125,7 +142,7 @@ class TitoQueue:
         self._groups[group_id] = group
         for member in group.members:
             self._member_index[member] = group_id
-        group._on_ready = self._note_ready
+        group._on_ready = self._on_ready_callback
         return group
 
     def mark_ready(self, member: Hashable) -> bool:
@@ -197,6 +214,20 @@ class TitoQueue:
         group._on_ready = None
         self._ready_seqs.discard(group.sequence)
         self._ready_groups.pop(group.sequence, None)
+        self._compact_ready_heap()
+
+    def _compact_ready_heap(self) -> None:
+        """Drop stale sequences so the ready heap cannot grow without bound.
+
+        ``peek`` only discards stale entries once they reach the top of the
+        heap, and in strict-order mode it never touches the heap at all, so
+        departed groups would otherwise leave their sequence numbers behind
+        forever.
+        """
+        if len(self._ready_heap) <= 2 * len(self._ready_seqs) + 8:
+            return
+        self._ready_heap = list(self._ready_seqs)
+        heapq.heapify(self._ready_heap)
 
     @property
     def groups(self) -> Tuple[Group, ...]:
