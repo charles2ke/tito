@@ -44,7 +44,7 @@ API below, apart from thread safety, and prints the same output.
 - `group_of(member)`, `groups`, `len(queue)`, `member in queue` - inspection.
 
 Invalid operations (empty groups, duplicate group ids or members, unknown
-members) raise `TitoError`.
+members, unhashable group ids or members) raise `TitoError`.
 
 ### Complexity
 

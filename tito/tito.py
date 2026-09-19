@@ -61,7 +61,12 @@ class Group:
         # One dict replaces the former "all members" set plus "ready members"
         # set: it answers membership in O(1) and carries the ready flag in the
         # same slot, so a fully ready group no longer stores every member twice.
-        ready: Dict[Hashable, bool] = dict.fromkeys(member_list, False)
+        try:
+            ready: Dict[Hashable, bool] = dict.fromkeys(member_list, False)
+        except TypeError:
+            raise TitoError(
+                f"group {group_id!r} contains unhashable members"
+            ) from None
         if len(ready) != len(member_list):
             raise TitoError(f"group {group_id!r} contains duplicate members")
         self.group_id = group_id
@@ -215,6 +220,10 @@ class TitoQueue:
         # Built outside the lock: validating members can run arbitrary user
         # code (hashing, iterating the ``members`` argument).
         group = Group(group_id, members, 0)
+        try:
+            hash(group_id)
+        except TypeError:
+            raise TitoError(f"group id {group_id!r} is not hashable") from None
         with self._lock:
             if group_id in self._groups:
                 raise TitoError(f"group {group_id!r} is already in the queue")
@@ -246,7 +255,7 @@ class TitoQueue:
     def mark_group_ready(self, group_id: Hashable) -> bool:
         """Mark every member of ``group_id`` ready."""
         with self._lock:
-            group = self._groups.get(group_id)
+            group = self._find(group_id)
             if group is None:
                 raise TitoError(f"group {group_id!r} is not in the queue")
             for member in group.members:
@@ -271,7 +280,7 @@ class TitoQueue:
         way a group departs without every member being ready.
         """
         with self._lock:
-            group = self._groups.get(group_id)
+            group = self._find(group_id)
             if group is None:
                 raise TitoError(f"group {group_id!r} is not in the queue")
             self._remove(group)
@@ -324,6 +333,13 @@ class TitoQueue:
                 if group is None:
                     return released
                 released.append(group)
+
+    def _find(self, group_id: Hashable) -> Optional[Group]:
+        """Look up a waiting group; unhashable ids simply match nothing."""
+        try:
+            return self._groups.get(group_id)
+        except TypeError:
+            return None
 
     def _note_ready(self, group: Group) -> None:
         """Record that ``group`` became ready, keeping arrival order."""
