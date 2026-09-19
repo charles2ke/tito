@@ -1,5 +1,63 @@
 # TITO examples
 
+Two kinds of example live here:
+
+- [`practical_usage.py`](practical_usage.py) - realistic uses of the real
+  `tito` package: *when* and *why* to reach for a TITO queue.
+- `tito_example.*` - self-contained reimplementations of the whole API in
+  thirteen languages, all printing the same API tour.
+
+## Practical usages
+
+[`practical_usage.py`](practical_usage.py) uses the installed package (or a
+plain checkout) to solve five small, realistic problems:
+
+| Scenario | Discipline it shows |
+| -------- | ------------------- |
+| Restaurant waitlist | strict order: a party is seated whole, and never overtaken by a later party |
+| Matchmaking lobbies | relaxed order: a complete lobby starts without waiting for an older, half-full one |
+| Batch publishing | all-or-nothing: every shard publishes together, and `cancel` rolls back the whole batch |
+| Parallel fan-out | thread safety: workers mark their own part ready, the request is answered once all parts land |
+| Guarded admission | invalid work is refused instead of corrupting a queued group |
+
+```bash
+python examples/practical_usage.py
+```
+
+It prints, from the repository root:
+
+```text
+-- restaurant seating (strict order) --
+ready to seat: None
+still waiting on: ['priya']
+seat mehta-party: asha raj priya
+seat okafor-party: ngozi chidi
+parties left on the waitlist: 0
+
+-- matchmaking lobbies (relaxed order) --
+start match: lobby-beta ['hedy', 'alan']
+alpha still loading: ['linus', 'grace']
+start match: lobby-alpha ['ada', 'linus', 'grace']
+lobbies waiting: 0
+
+-- batch publishing (all-or-nothing) --
+publish 2026-09-18: 3 shards
+rolled back 2026-09-19, 2/3 shards computed
+nothing half-published: True
+
+-- parallel fan-out (thread-safe) --
+respond to request-7 with 3 parts: orders-data profile-data recommendations-data
+
+-- guarded admission --
+refused: members already in the queue: ['nurse-2']
+shift-a intact: ['nurse-1', 'nurse-2']
+```
+
+`tests/test_practical_usage.py` runs every scenario, so the code above stays
+honest.
+
+## API tour, in thirteen languages
+
 Self-contained implementations of the TITO discipline in popular languages.
 Each example implements the whole `TitoQueue` and `Group` API and runs the same
 four-part demo: strict (head-of-line FIFO) ordering, relaxed ordering,
