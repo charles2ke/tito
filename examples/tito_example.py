@@ -187,21 +187,21 @@ def flag(value):
 
 def show(group):
     """Format an optional group, as returned by peek() and release()."""
-    return "waiting" if group is None else "%s" % group
+    return "waiting" if group is None else str(group)
 
 
 def show_all(groups):
     """Format the group lists returned by release_all() and clear()."""
     if not groups:
         return "none"
-    return ", ".join("%s" % group for group in groups)
+    return ", ".join(str(group) for group in groups)
 
 
 def show_ids(groups):
     """Format the group ids of the waiting groups."""
     if not groups:
         return "none"
-    return " ".join("%s" % group.group_id for group in groups)
+    return " ".join(group.group_id for group in groups)
 
 
 def strict_order_demo():
