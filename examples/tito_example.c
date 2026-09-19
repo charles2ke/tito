@@ -44,7 +44,11 @@ static void tito_init(TitoQueue *queue, int strict_order) {
     queue->error[0] = '\0';
 }
 
-/* Bounded copy that always terminates; names longer than MAX_NAME are clipped. */
+static int name_fits(const char *name) {
+    return strlen(name) < MAX_NAME;
+}
+
+/* Bounded copy that always terminates; callers validate names fit first. */
 static void copy_name(char *dst, const char *src) {
     size_t i = 0;
 
@@ -122,6 +126,16 @@ static Group *tito_admit(TitoQueue *queue, const char *id, const char *const *me
         snprintf(queue->error, sizeof queue->error,
                  "group %s must contain at least one member", id);
         return NULL;
+    }
+    if (!name_fits(id)) {
+        snprintf(queue->error, sizeof queue->error, "group %s is too long", id);
+        return NULL;
+    }
+    for (int i = 0; i < count; i++) {
+        if (!name_fits(members[i])) {
+            snprintf(queue->error, sizeof queue->error, "member %s is too long", members[i]);
+            return NULL;
+        }
     }
     for (int i = 0; i < count; i++) {
         for (int j = 0; j < i; j++) {
