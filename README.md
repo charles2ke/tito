@@ -24,7 +24,8 @@ queue.release()                   # Group(group_id='party-1', ...)
 
 The same discipline written from scratch in thirteen popular languages lives in
 [`examples/`](examples/README.md) - C, C++, C#, Go, Java, JavaScript, Kotlin,
-PHP, Python, Ruby, Rust, Swift and TypeScript.
+PHP, Python, Ruby, Rust, Swift and TypeScript. Each one implements the whole
+API below, apart from thread safety, and prints the same output.
 
 ### Ordering policies
 

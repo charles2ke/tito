@@ -1,21 +1,66 @@
 # TITO examples
 
 Self-contained implementations of the TITO discipline in popular languages.
-Each example builds a small strict-order (head-of-line FIFO) queue, admits two
-groups, marks members ready one at a time, and shows that `party-1` only leaves
-once *both* of its members are ready.
+Each example implements the whole `TitoQueue` and `Group` API and runs the same
+four-part demo: strict (head-of-line FIFO) ordering, relaxed ordering,
+withdrawing groups with `cancel`/`clear`, and the errors that guard the TITO
+invariants.
 
 Every example prints exactly the same output:
 
 ```text
-admit party-1: ann, bob
-admit party-2: cy
-ready ann
+-- strict order --
+admit party-1 [ann bob]
+admit party-2 [cy]
+len 2, groups party-1 party-2
+contains ann true, contains zoe false
+group_of bob -> party-1
+party-1: size 2, contains ann true, contains zoe false
+mark_ready ann -> group ready false
+party-1: 1/2 ready [ann] waiting [bob] is_ready false
+peek -> waiting
 release -> waiting
-ready bob
+party-1.mark_ready bob -> group ready true
+party-1: 2/2 ready [ann bob] waiting [] is_ready true
+peek -> party-1 [ann bob]
 release -> party-1 [ann bob]
-ready cy
-release -> party-2 [cy]
+mark_group_ready party-2 -> true
+release_all -> party-2 [cy]
+len 0
+
+-- relaxed order --
+strict_order false
+admit party-3 [dee eli]
+admit party-4 [fay]
+mark_group_ready party-4 -> true
+peek -> party-4 [fay]
+release -> party-4 [fay]
+mark_ready dee -> group ready false
+release -> waiting
+mark_ready eli -> group ready true
+release_all -> party-3 [dee eli]
+len 0
+
+-- cancel and clear --
+admit party-5 [gil hal]
+admit party-6 [ivy]
+admit party-7 [jay]
+mark_ready gil -> group ready false
+cancel party-5 -> party-5 [gil hal] 1/2 ready
+groups party-6 party-7
+clear -> party-6 [ivy], party-7 [jay]
+len 0, contains ivy false
+
+-- errors --
+admit party-8 [kim]
+admit party-8 [kim] -> group party-8 is already in the queue
+admit party-9 [] -> group party-9 must contain at least one member
+admit party-9 [jay jay] -> group party-9 contains duplicate members
+admit party-9 [kim] -> members already in the queue: kim
+mark_ready zoe -> zoe is not in the queue
+party-8.mark_ready zoe -> zoe is not a member of group party-8
+mark_group_ready party-9 -> group party-9 is not in the queue
+cancel party-9 -> group party-9 is not in the queue
 ```
 
 The examples depend only on their language's standard library, so none of them
@@ -44,12 +89,26 @@ Run every command from the repository root.
 
 ## What the examples cover
 
-- `admit(group_id, members)` - members enter as one group, in arrival order.
-- `mark_ready(member)` - a single member signals it is ready to leave.
-- `release()` - returns the head group only when *all* of its members are
-  ready, so groups leave whole and in arrival order.
+Every method of the package's public API:
 
-They deliberately leave out the features of the Python package that would
-obscure the discipline itself: the non-strict ordering policy, `peek()`,
-`release_all()`, `cancel()`, `clear()`, and thread safety. See the
-[top-level README](../README.md) for those.
+- `admit(group_id, members)` - members enter as one group, in arrival order.
+- `mark_ready(member)` / `mark_group_ready(group_id)` - signal readiness;
+  marking a member reports whether its whole group has become ready.
+- `peek()` / `release()` / `release_all()` - a group is only ever handed back
+  when *all* of its members are ready, so groups leave whole and in order.
+- `cancel(group_id)` / `clear()` - withdraw waiting groups; a cancelled group
+  still leaves as a whole, ready or not.
+- `group_of(member)`, `groups`, queue length and membership tests.
+- On a group: `members`, `ready_members`, `waiting_members`, `ready_count`,
+  `is_ready`, `mark_ready(member)`, size and membership tests.
+- Both ordering policies: strict order (head-of-line FIFO, the default), and
+  relaxed order, where a ready group is not held up by an older group that is
+  still waiting.
+- The errors that invalid operations report: empty groups, duplicate group ids
+  or members, and unknown members or groups.
+
+They deliberately leave out the parts of the Python package that are about
+performance and concurrency rather than the discipline itself: the package
+indexes ready groups in an arrival-ordered heap and is thread-safe, while the
+examples just scan the waiting groups in arrival order and assume a single
+thread. See the [top-level README](../README.md) for those.
