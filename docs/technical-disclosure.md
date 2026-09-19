@@ -53,7 +53,8 @@ For a queue Q holding groups G1..Gn:
    index, so no second release of the same group can occur even under
    concurrent callers.
 6. **Cancellation is the only exception to (3), never to (2).** `cancel()`
-   withdraws a group that is not fully ready, but still withdraws it whole.
+   withdraws one group and `clear()` bulk-cancels all waiting groups, including
+   groups that are not fully ready; both withdraw groups whole.
 
 Violations raise `TitoError` rather than silently degrading.
 
