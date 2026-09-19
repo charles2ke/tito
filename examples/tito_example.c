@@ -287,7 +287,12 @@ static int tito_cancel(TitoQueue *queue, const char *id, Group *out) {
 
 /* Withdraw every waiting group, in arrival order, into out. */
 static int tito_clear(TitoQueue *queue, Group *out, int capacity) {
-    int count = queue->group_count < capacity ? queue->group_count : capacity;
+    int count = queue->group_count;
+
+    if (capacity < count) {
+        snprintf(queue->error, sizeof queue->error, "clear output buffer is too small");
+        return -1;
+    }
 
     for (int g = 0; g < count; g++) {
         out[g] = queue->groups[g];

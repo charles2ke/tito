@@ -339,14 +339,16 @@ fn strict_order_demo() -> Result<(), TitoError> {
         flag(queue.contains("zoe"))
     );
 
-    let party1 = queue.group_of("bob").expect("party-1 is queued");
-    println!("group_of bob -> {}", party1.group_id);
-    println!(
-        "party-1: size {}, contains ann {}, contains zoe {}",
-        party1.len(),
-        flag(party1.contains("ann")),
-        flag(party1.contains("zoe"))
-    );
+    {
+        let party1 = queue.group_of("bob").expect("party-1 is queued");
+        println!("group_of bob -> {}", party1.group_id);
+        println!(
+            "party-1: size {}, contains ann {}, contains zoe {}",
+            party1.len(),
+            flag(party1.contains("ann")),
+            flag(party1.contains("zoe"))
+        );
+    }
 
     println!(
         "mark_ready ann -> group ready {}",
