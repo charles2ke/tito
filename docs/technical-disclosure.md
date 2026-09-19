@@ -118,7 +118,7 @@ Three implementation details are worth calling out as the non-obvious parts:
    From that point on, marking a member ready and the queue bookkeeping that
    readiness triggers happen under one lock as a single atomic step. This
    removes the lock-ordering problem between group and queue without forcing
-   validation to run under the queue lock.
+   initial member construction and iteration to run under the queue lock.
 
 3. **Weak-referencing readiness callback with heap compaction.** The group's
    readiness callback holds only a weak reference to the queue, so the
@@ -137,8 +137,8 @@ For a group of `k` members, `n` groups waiting, `m` total queued members:
 | Operation | `strict_order=True` | `strict_order=False` |
 | --- | --- | --- |
 | `admit(group_id, members)` | O(k) | O(k) |
-| `mark_ready(member)` | O(1) | O(1) amortised |
-| `mark_group_ready(group_id)` | O(k) | O(k) amortised |
+| `mark_ready(member)` | O(1) | O(log n) amortised |
+| `mark_group_ready(group_id)` | O(k) | O(k + log n) amortised |
 | `peek()` | O(1) | O(log n) amortised |
 | `release()` | O(k) | O(k + log n) amortised |
 | `release_all()` | O(total released) | O(total released + log n per group) |
@@ -176,7 +176,8 @@ professional search. None of these is asserted to be novel.
   policy forbids from departing.
 - **(c)** The lock-donation admission protocol of §6.2, which makes
   "mark member ready" and the queue-level bookkeeping it triggers atomic under
-  a single lock without performing user-supplied validation under that lock.
+  a single lock while keeping initial member construction and iteration outside
+  that lock.
 - **(d)** The bounded lazy readiness index of §6.3: weak-referenced completion
   callback plus threshold-triggered heap compaction, which keeps the
   cancellation-heavy workload from growing the index without bound.
@@ -222,11 +223,12 @@ observations about legal risk, not legal advice.
    similarly disfavours a pure scheduling abstraction.
 
 3. **AGPL-3.0 grants a patent licence.** Section 11 of the AGPL-3.0 conveys an
-   express, royalty-free patent licence from each contributor to each
-   recipient, covering claims that would be infringed by the contribution as
-   conveyed. A granted patent would therefore not be enforceable against users
-   of the released code. Any enforcement value would lie only outside what has
-   already been conveyed - which, given §10, is not much.
+   express, royalty-free patent licence from each contributor to each recipient
+   under the contributor's essential patent claims, for permitted acts involving
+   that contributor version. A patent owned or controlled by a contributor
+   therefore has limited enforcement value against recipients' licensed use of
+   that released contribution. Any enforcement value would lie only outside what
+   has already been conveyed - which, given §10, is not much.
 
 4. **Prior art is substantial.** Gang scheduling and coscheduling literature
    dating to 1982 covers atomic group admission and release directly. See
