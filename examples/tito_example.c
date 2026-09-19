@@ -22,11 +22,13 @@ typedef struct {
     Group groups[MAX_GROUPS];
     int head;  /* index of the oldest waiting group */
     int tail;  /* one past the newest waiting group */
+    int group_count;
 } TitoQueue;
 
 static void tito_init(TitoQueue *queue) {
     queue->head = 0;
     queue->tail = 0;
+    queue->group_count = 0;
 }
 
 /* Returns 0 on success, -1 if the group does not fit or a name is too long. */
@@ -34,23 +36,39 @@ static int tito_admit(TitoQueue *queue, const char *id, const char *const *membe
     Group *group;
     int i;
 
-    if (count <= 0 || count > MAX_MEMBERS || queue->tail == MAX_GROUPS) {
+    if (count <= 0 || count > MAX_MEMBERS || queue->group_count == MAX_GROUPS) {
         return -1;
     }
     if (strlen(id) >= MAX_NAME) {
         return -1;
     }
-    group = &queue->groups[queue->tail];
-    snprintf(group->id, MAX_NAME, "%s", id);
-    group->member_count = count;
     for (i = 0; i < count; i++) {
         if (strlen(members[i]) >= MAX_NAME) {
             return -1;
         }
+        for (int j = 0; j < i; j++) {
+            if (strcmp(members[j], members[i]) == 0) {
+                return -1;
+            }
+        }
+        for (int g = 0; g < queue->group_count; g++) {
+            const Group *queued = &queue->groups[(queue->head + g) % MAX_GROUPS];
+            for (int j = 0; j < queued->member_count; j++) {
+                if (strcmp(queued->members[j], members[i]) == 0) {
+                    return -1;
+                }
+            }
+        }
+    }
+    group = &queue->groups[queue->tail];
+    snprintf(group->id, MAX_NAME, "%s", id);
+    group->member_count = count;
+    for (i = 0; i < count; i++) {
         snprintf(group->members[i], MAX_NAME, "%s", members[i]);
         group->ready[i] = 0;
     }
-    queue->tail++;
+    queue->tail = (queue->tail + 1) % MAX_GROUPS;
+    queue->group_count++;
     return 0;
 }
 
@@ -58,8 +76,8 @@ static int tito_admit(TitoQueue *queue, const char *id, const char *const *membe
 static int tito_mark_ready(TitoQueue *queue, const char *member) {
     int g, i;
 
-    for (g = queue->head; g < queue->tail; g++) {
-        Group *group = &queue->groups[g];
+    for (g = 0; g < queue->group_count; g++) {
+        Group *group = &queue->groups[(queue->head + g) % MAX_GROUPS];
         for (i = 0; i < group->member_count; i++) {
             if (strcmp(group->members[i], member) == 0) {
                 group->ready[i] = 1;
@@ -75,7 +93,7 @@ static const Group *tito_release(TitoQueue *queue) {
     Group *group;
     int i;
 
-    if (queue->head == queue->tail) {
+    if (queue->group_count == 0) {
         return NULL;
     }
     group = &queue->groups[queue->head];
@@ -84,7 +102,8 @@ static const Group *tito_release(TitoQueue *queue) {
             return NULL;
         }
     }
-    queue->head++;
+    queue->head = (queue->head + 1) % MAX_GROUPS;
+    queue->group_count--;
     return group;
 }
 

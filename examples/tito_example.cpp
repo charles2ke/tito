@@ -30,8 +30,9 @@ public:
         if (ids_.count(id) != 0) {
             throw std::invalid_argument("duplicate group id: " + id);
         }
+        std::unordered_set<std::string> new_members;
         for (const auto& member : members) {
-            if (group_of_.count(member) != 0) {
+            if (group_of_.count(member) != 0 || !new_members.insert(member).second) {
                 throw std::invalid_argument("duplicate member: " + member);
             }
         }
