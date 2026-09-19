@@ -35,6 +35,7 @@ admit       ┌───────────────┐   ┌───�
 - [Thread safety](#-thread-safety)
 - [Examples in 13 languages](#-examples-in-13-languages)
 - [Requirements & tests](#-requirements--tests)
+- [Further reading](#-further-reading)
 
 ## 🚀 Quick start
 
