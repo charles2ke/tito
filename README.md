@@ -22,6 +22,10 @@ queue.mark_ready("bob")
 queue.release()                   # Group(group_id='party-1', ...)
 ```
 
+The same discipline written from scratch in thirteen popular languages lives in
+[`examples/`](examples/README.md) - C, C++, C#, Go, Java, JavaScript, Kotlin,
+PHP, Python, Ruby, Rust, Swift and TypeScript.
+
 ### Ordering policies
 
 - `TitoQueue(strict_order=True)` (default): head-of-line FIFO. Only the oldest
