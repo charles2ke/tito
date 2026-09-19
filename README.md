@@ -27,6 +27,23 @@ The same discipline written from scratch in thirteen popular languages lives in
 PHP, Python, Ruby, Rust, Swift and TypeScript. Each one implements the whole
 API below, apart from thread safety, and prints the same output.
 
+### Practical usages
+
+[`examples/practical_usage.py`](examples/practical_usage.py) applies the real
+package to five small, realistic problems - run it with
+`python examples/practical_usage.py`:
+
+- **Restaurant waitlist** (strict order) - a party is seated only once every
+  guest has arrived, and never overtaken by a party that arrived later.
+- **Matchmaking lobbies** (relaxed order) - a complete squad starts its match
+  without waiting for an older, half-full lobby.
+- **Batch publishing** - the shards of a dataset publish together, and a failed
+  batch is withdrawn whole with `cancel`, so nothing partial is ever published.
+- **Parallel fan-out** - worker threads mark their own part of a request ready;
+  the response is assembled once all parts have landed, with no extra locking.
+- **Guarded admission** - double-booking a member is refused rather than
+  silently corrupting the group that already holds it.
+
 ### Ordering policies
 
 - `TitoQueue(strict_order=True)` (default): head-of-line FIFO. Only the oldest
