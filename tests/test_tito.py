@@ -227,6 +227,26 @@ class HardeningTests(unittest.TestCase):
         with self.assertRaises(TitoError):
             group.mark_ready(["unhashable"])
 
+    def test_unhashable_admission_raises_tito_error(self):
+        queue = TitoQueue()
+        with self.assertRaises(TitoError):
+            queue.admit("g", [["unhashable"]])
+        with self.assertRaises(TitoError):
+            queue.admit(["unhashable"], ["a"])
+        with self.assertRaises(TitoError):
+            Group("g", [["unhashable"]], 0)
+        self.assertEqual(len(queue), 0)
+        self.assertEqual(queue.groups, ())
+        queue.admit("g", ["a"])
+        self.assertEqual(len(queue), 1)
+
+    def test_unhashable_group_id_lookups_raise_tito_error(self):
+        queue = TitoQueue()
+        with self.assertRaises(TitoError):
+            queue.cancel(["unhashable"])
+        with self.assertRaises(TitoError):
+            queue.mark_group_ready(["unhashable"])
+
     def test_ready_count_tracks_marked_members(self):
         group = Group("g", ["a", "b"], 0)
         self.assertEqual(group.ready_count, 0)
