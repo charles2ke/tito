@@ -2,7 +2,7 @@
 
 Unlike the thirteen ``tito_example.*`` files, which reimplement the API from
 scratch and all print the same tour of it, this file shows *why* you would
-reach for a TITO queue: four small, realistic problems where work must be
+reach for a TITO queue: five small, realistic problems where work must be
 admitted and released group by group.
 
 Run: python examples/practical_usage.py
