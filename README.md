@@ -26,6 +26,7 @@ admit       ┌───────────────┐   ┌───�
 
 ## 📑 Contents
 
+- [Install](#-install)
 - [Quick start](#-quick-start)
 - [Why TITO?](#-why-tito)
 - [Ordering policies](#-ordering-policies)
@@ -36,6 +37,19 @@ admit       ┌───────────────┐   ┌───�
 - [Examples in 13 languages](#-examples-in-13-languages)
 - [Requirements & tests](#-requirements--tests)
 - [Further reading](#-further-reading)
+
+## 📦 Install
+
+TITO is not published on PyPI; install it from a checkout of this repository:
+
+```bash
+git clone https://github.com/charles2ke/tito.git
+cd tito
+pip install .
+```
+
+For a quick look you can also skip installing altogether and run Python from
+the repository root — `tito/` is an ordinary importable package.
 
 ## 🚀 Quick start
 
@@ -88,6 +102,16 @@ package to five small, realistic problems — run it with
 
 Invalid operations (empty groups, duplicate group ids or members, unknown
 members, unhashable group ids or members) raise `TitoError`.
+
+A `Group` returned by `admit()`, `release()` or `cancel()` is a plain object you can keep and inspect:
+
+| Call | Purpose |
+| ---- | ------- |
+| `members`, `ready_members`, `waiting_members` | Membership in admission order. |
+| `is_ready`, `ready_count` | Whether the whole group may depart, and how far along it is. |
+| `sequence` | Arrival order assigned at admission. |
+| `mark_ready(member)` | Mark one member ready; returns whether the group is now ready. |
+| `len(group)`, `iter(group)`, `member in group` | Inspection. |
 
 ## ⚡ Complexity
 

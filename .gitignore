@@ -1,6 +1,10 @@
 __pycache__/
 *.py[cod]
 
+# setuptools build output
+build/
+*.egg-info/
+
 # dotnet run --project examples/csharp writes these next to the example.
 bin/
 obj/
