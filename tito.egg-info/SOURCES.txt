@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+tests/test_practical_usage.py
+tests/test_tito.py
+tito/__init__.py
+tito/py.typed
+tito/tito.py
+tito.egg-info/PKG-INFO
+tito.egg-info/SOURCES.txt
+tito.egg-info/dependency_links.txt
+tito.egg-info/top_level.txt
