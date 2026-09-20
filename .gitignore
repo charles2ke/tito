@@ -3,6 +3,7 @@ __pycache__/
 
 # setuptools build output
 build/
+*.egg-info/
 
 # dotnet run --project examples/csharp writes these next to the example.
 bin/

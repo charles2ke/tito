@@ -103,7 +103,7 @@ package to five small, realistic problems — run it with
 Invalid operations (empty groups, duplicate group ids or members, unknown
 members, unhashable group ids or members) raise `TitoError`.
 
-A released or cancelled `Group` is a plain object you can keep and inspect:
+A `Group` returned by `admit()`, `release()` or `cancel()` is a plain object you can keep and inspect:
 
 | Call | Purpose |
 | ---- | ------- |
