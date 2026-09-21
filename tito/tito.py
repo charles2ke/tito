@@ -67,7 +67,7 @@ class Group:
         # A bare string iterates character by character, which is never what a
         # caller means by "the members of this group", so say so plainly
         # instead of admitting one group per letter.
-        if isinstance(members, (str, bytes, bytearray)):
+        if isinstance(members, (str, bytes)):
             raise TitoError(
                 f"group {group_id!r} was given {members!r} as its members; "
                 f"pass a collection such as [{members!r}] instead"
