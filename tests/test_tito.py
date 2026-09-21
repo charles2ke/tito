@@ -201,6 +201,60 @@ class ReadyTrackingTests(unittest.TestCase):
         self.assertIsNone(queue.release())
 
 
+class DiagnosticsTests(unittest.TestCase):
+    """Messages and reprs that tell a caller what went wrong, and where."""
+
+    def test_string_members_are_refused_with_a_hint(self):
+        queue = TitoQueue()
+        with self.assertRaises(TitoError) as caught:
+            queue.admit("g", "ann")
+        self.assertIn("['ann']", str(caught.exception))
+        self.assertNotIn("g", queue._groups)
+
+    def test_duplicate_members_are_named(self):
+        with self.assertRaises(TitoError) as caught:
+            Group("g", ["a", "b", "a"], 0)
+        self.assertIn("duplicate members: ['a']", str(caught.exception))
+
+    def test_unhashable_members_are_named(self):
+        with self.assertRaises(TitoError) as caught:
+            Group("g", ["a", ["b"]], 0)
+        self.assertIn("unhashable members: [['b']]", str(caught.exception))
+
+    def test_double_booking_names_the_holding_group(self):
+        queue = TitoQueue()
+        queue.admit("g1", ["a"])
+        with self.assertRaises(TitoError) as caught:
+            queue.admit("g2", ["a"])
+        self.assertIn("'a'", str(caught.exception))
+        self.assertIn("g1", str(caught.exception))
+
+    def test_unknown_member_and_group_messages_mention_departure(self):
+        queue = TitoQueue()
+        with self.assertRaises(TitoError) as caught:
+            queue.mark_ready("nobody")
+        self.assertIn("departed", str(caught.exception))
+        with self.assertRaises(TitoError) as caught:
+            queue.cancel("missing")
+        self.assertIn("departed", str(caught.exception))
+
+    def test_group_repr_shows_who_is_still_waiting(self):
+        group = Group("g", ["a", "b"], 0)
+        self.assertIn("waiting on ['a', 'b']", repr(group))
+        group.mark_ready("a")
+        self.assertIn("waiting on ['b']", repr(group))
+        group.mark_ready("b")
+        self.assertIn("ready=2/2", repr(group))
+
+    def test_queue_repr_counts_waiting_and_ready_groups(self):
+        queue = TitoQueue()
+        queue.admit("g1", ["a"])
+        queue.admit("g2", ["b"])
+        queue.mark_ready("a")
+        self.assertIn("groups=2", repr(queue))
+        self.assertIn("ready=1", repr(queue))
+
+
 class HardeningTests(unittest.TestCase):
     """Invariants that keep a long-running queue consistent."""
 
