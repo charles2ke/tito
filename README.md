@@ -82,6 +82,11 @@ Every misuse raises `TitoError` — the single exception type you need to catch 
 and the message names the member, group or fix involved:
 
 ```python
+>>> from tito import TitoQueue
+>>> queue = TitoQueue()
+>>> queue.admit("party-1", ["ann", "bob"])
+>>> queue.admit("party-2", ["cy"])
+>>> queue.mark_ready("ann")
 >>> queue.admit("party-3", "dee")   # a string is not a collection of members
 tito.tito.TitoError: group 'party-3' was given 'dee' as its members; pass a collection such as ['dee'] instead
 >>> queue.mark_ready("zoe")
