@@ -37,6 +37,15 @@ class TitoError(Exception):
     """Raised when an operation would violate the TITO invariants."""
 
 
+def _is_hashable(value: object) -> bool:
+    """Whether ``value`` can be used as a group id or member."""
+    try:
+        hash(value)
+    except TypeError:
+        return False
+    return True
+
+
 class Group:
     """A set of members that entered the queue together.
 
@@ -55,6 +64,14 @@ class Group:
     )
 
     def __init__(self, group_id: Hashable, members: Iterable[Hashable], sequence: int) -> None:
+        # A bare string iterates character by character, which is never what a
+        # caller means by "the members of this group", so say so plainly
+        # instead of admitting one group per letter.
+        if isinstance(members, (str, bytes)):
+            raise TitoError(
+                f"group {group_id!r} was given {members!r} as its members; "
+                f"pass a collection such as [{members!r}] instead"
+            )
         member_list: Tuple[Hashable, ...] = tuple(members)
         if not member_list:
             raise TitoError(f"group {group_id!r} must contain at least one member")
@@ -64,11 +81,20 @@ class Group:
         try:
             ready: Dict[Hashable, bool] = dict.fromkeys(member_list, False)
         except TypeError:
+            unhashable = [m for m in member_list if not _is_hashable(m)]
             raise TitoError(
-                f"group {group_id!r} contains unhashable members"
+                f"group {group_id!r} contains unhashable members: {unhashable!r}"
             ) from None
         if len(ready) != len(member_list):
-            raise TitoError(f"group {group_id!r} contains duplicate members")
+            seen: Dict[Hashable, bool] = {}
+            duplicates: List[Hashable] = []
+            for member in member_list:
+                if member in seen and member not in duplicates:
+                    duplicates.append(member)
+                seen[member] = True
+            raise TitoError(
+                f"group {group_id!r} contains duplicate members: {duplicates!r}"
+            )
         self.group_id = group_id
         self._members = member_list
         self._ready = ready
@@ -126,11 +152,13 @@ class Group:
                 already = self._ready[member]
             except KeyError:
                 raise TitoError(
-                    f"{member!r} is not a member of group {self.group_id!r}"
+                    f"{member!r} is not a member of group {self.group_id!r}; "
+                    f"its members are {list(self._members)!r}"
                 ) from None
             except TypeError:
                 raise TitoError(
-                    f"{member!r} is not a member of group {self.group_id!r}"
+                    f"{member!r} is not a member of group {self.group_id!r}; "
+                    f"its members are {list(self._members)!r}"
                 ) from None
             if already:
                 return self._ready_count == len(self._members)
@@ -157,9 +185,11 @@ class Group:
     def __repr__(self) -> str:
         with self._lock:
             ready_count = self._ready_count
+            waiting = self.waiting_members
+        waiting_note = f", waiting on {list(waiting)!r}" if waiting else ""
         return (
             f"Group(group_id={self.group_id!r}, members={list(self._members)!r}, "
-            f"ready={ready_count}/{len(self._members)})"
+            f"ready={ready_count}/{len(self._members)}{waiting_note})"
         )
 
 
@@ -226,11 +256,18 @@ class TitoQueue:
             raise TitoError(f"group id {group_id!r} is not hashable") from None
         with self._lock:
             if group_id in self._groups:
-                raise TitoError(f"group {group_id!r} is already in the queue")
+                raise TitoError(
+                    f"group {group_id!r} is already in the queue; "
+                    f"use a distinct group id"
+                )
             member_index = self._member_index
             already_queued = [m for m in group.members if m in member_index]
             if already_queued:
-                raise TitoError(f"members already in the queue: {already_queued!r}")
+                held_by = {m: member_index[m] for m in already_queued}
+                raise TitoError(
+                    f"members already in the queue: {already_queued!r} "
+                    f"(held by {held_by!r})"
+                )
             group._sequence = self._sequence
             self._sequence += 1
             # The group shares the queue lock from now on, so marking a member
@@ -249,7 +286,10 @@ class TitoQueue:
         with self._lock:
             group = self.group_of(member)
             if group is None:
-                raise TitoError(f"{member!r} is not in the queue")
+                raise TitoError(
+                    f"{member!r} is not in the queue; admit the group it "
+                    f"belongs to first, or it may already have departed"
+                )
             return group.mark_ready(member)
 
     def mark_group_ready(self, group_id: Hashable) -> bool:
@@ -257,7 +297,10 @@ class TitoQueue:
         with self._lock:
             group = self._find(group_id)
             if group is None:
-                raise TitoError(f"group {group_id!r} is not in the queue")
+                raise TitoError(
+                    f"group {group_id!r} is not in the queue; it was never "
+                    f"admitted, or it has already departed"
+                )
             for member in group.members:
                 group.mark_ready(member)
             return True
@@ -282,7 +325,10 @@ class TitoQueue:
         with self._lock:
             group = self._find(group_id)
             if group is None:
-                raise TitoError(f"group {group_id!r} is not in the queue")
+                raise TitoError(
+                    f"group {group_id!r} is not in the queue; it was never "
+                    f"admitted, or it has already departed"
+                )
             self._remove(group)
             return group
 
@@ -387,4 +433,10 @@ class TitoQueue:
             return False
 
     def __repr__(self) -> str:
-        return f"TitoQueue(strict_order={self._strict_order}, groups={len(self._groups)})"
+        with self._lock:
+            waiting = len(self._groups)
+            ready = sum(1 for group in self._groups.values() if group.is_ready)
+        return (
+            f"TitoQueue(strict_order={self._strict_order}, groups={waiting}, "
+            f"ready={ready})"
+        )

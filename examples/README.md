@@ -49,7 +49,7 @@ nothing half-published: True
 respond to request-7 with 3 parts: orders-data profile-data recommendations-data
 
 -- guarded admission --
-refused: members already in the queue: ['nurse-2']
+refused: members already in the queue: ['nurse-2'] (held by {'nurse-2': 'shift-a'})
 shift-a intact: ['nurse-1', 'nurse-2']
 ```
 
