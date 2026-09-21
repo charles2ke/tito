@@ -28,6 +28,7 @@ admit       ┌───────────────┐   ┌───�
 
 - [Install](#-install)
 - [Quick start](#-quick-start)
+- [Errors & debugging](#-errors--debugging)
 - [Why TITO?](#-why-tito)
 - [Ordering policies](#-ordering-policies)
 - [API](#-api)
@@ -40,7 +41,13 @@ admit       ┌───────────────┐   ┌───�
 
 ## 📦 Install
 
-TITO is not published on PyPI; install it from a checkout of this repository:
+TITO is not published on PyPI. Install it straight from GitHub:
+
+```bash
+pip install git+https://github.com/charles2ke/tito.git
+```
+
+…or from a checkout, which also gives you the tests and examples:
 
 ```bash
 git clone https://github.com/charles2ke/tito.git
@@ -68,6 +75,28 @@ queue.release()                   # Group(group_id='party-1', ...)
 ```
 
 No third-party dependencies, no configuration, no background threads.
+
+## 🔎 Errors & debugging
+
+Every misuse raises `TitoError` — the single exception type you need to catch —
+and the message names the member, group or fix involved:
+
+```python
+>>> queue.admit("party-3", "dee")   # a string is not a collection of members
+tito.tito.TitoError: group 'party-3' was given 'dee' as its members; pass a collection such as ['dee'] instead
+>>> queue.mark_ready("zoe")
+tito.tito.TitoError: 'zoe' is not in the queue; admit the group it belongs to first, or it may already have departed
+```
+
+Printing a queue or a group tells you exactly what the queue is waiting for,
+which is usually the answer to "why did `release()` return `None`?":
+
+```python
+>>> queue
+TitoQueue(strict_order=True, groups=2, ready=0)
+>>> queue.group_of("ann")
+Group(group_id='party-1', members=['ann', 'bob'], ready=1/2, waiting on ['bob'])
+```
 
 ## 💡 Why TITO?
 
@@ -101,7 +130,8 @@ package to five small, realistic problems — run it with
 | `group_of(member)`, `groups`, `len(queue)`, `member in queue` | Inspection. |
 
 Invalid operations (empty groups, duplicate group ids or members, unknown
-members, unhashable group ids or members) raise `TitoError`.
+members, unhashable group ids or members) raise
+[`TitoError`](#-errors--debugging).
 
 A `Group` returned by `admit()`, `release()` or `cancel()` is a plain object you can keep and inspect:
 
@@ -183,7 +213,8 @@ API above, apart from thread safety, and prints the same output.
 Python 3.9 or newer. No third-party dependencies.
 
 ```bash
-python -m unittest discover -s tests
+python -m unittest discover -s tests   # the library's own test suite
+python examples/practical_usage.py     # five realistic scenarios, end to end
 ```
 
 ## 📖 Further reading

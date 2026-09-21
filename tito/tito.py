@@ -186,10 +186,10 @@ class Group:
         with self._lock:
             ready_count = self._ready_count
             waiting = self.waiting_members
-        state = "ready" if not waiting else f"waiting on {list(waiting)!r}"
+        waiting_note = f", waiting on {list(waiting)!r}" if waiting else ""
         return (
             f"Group(group_id={self.group_id!r}, members={list(self._members)!r}, "
-            f"ready={ready_count}/{len(self._members)}, {state})"
+            f"ready={ready_count}/{len(self._members)}{waiting_note})"
         )
 
 
