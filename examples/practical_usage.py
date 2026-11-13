@@ -126,7 +126,10 @@ def parallel_fan_out():
         results[part] = "%s-data" % part  # stands in for an I/O call
         inflight.mark_ready(part)
 
-    workers = [threading.Thread(target=fetch, args=(part,)) for part in parts]
+    workers = [
+        threading.Thread(target=fetch, args=(part,), daemon=True)
+        for part in parts
+    ]
     for worker in workers:
         worker.start()
 
@@ -137,8 +140,8 @@ def parallel_fan_out():
         print("respond to %s with %d parts: %s"
               % (response.group_id, len(response),
                  " ".join(sorted(results[part] for part in response.members))))
-    for worker in workers:
-        worker.join()
+        for worker in workers:
+            worker.join()
 
 
 def guarded_admission():
