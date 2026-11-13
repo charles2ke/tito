@@ -128,7 +128,10 @@ class TitoQueue:
 
     def get(self, group_id):
         """The waiting group with this id, or None if it is not in the queue."""
-        return self._groups.get(group_id)
+        try:
+            return self._groups.get(group_id)
+        except TypeError:
+            return None
 
     def group_of(self, member):
         """The group a queued member belongs to, or None if not queued."""
