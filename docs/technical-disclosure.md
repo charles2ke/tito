@@ -45,8 +45,10 @@ For a queue Q holding groups G1..Gn:
    as one indivisible unit. Members cannot be added to a group after admission.
 2. **Group atomicity on exit.** A group departs as a whole or not at all. There
    is no operation that removes a strict subset of a group's members.
-3. **Unanimous readiness.** A group is eligible to be released only when every
-   one of its members has been marked ready.
+3. **Unanimous readiness.** A group is eligible to be released only while every
+   one of its members is marked ready. Readiness can be withdrawn:
+   `mark_waiting(member)` makes the group ineligible again until that member is
+   re-marked ready, without moving the group from its place in arrival order.
 4. **Uniqueness.** A member belongs to at most one group in the queue at a
    time; a group id appears at most once.
 5. **Single release.** A group that has been released is removed from every
@@ -72,7 +74,9 @@ first still waits. Guarantees: departure order is exactly arrival order.
 Because only the head can ever be the answer, the implementation keeps **no
 readiness index at all**. `peek()` inspects the head of an insertion-ordered
 map and tests its readiness in O(1). Tracking which younger groups are ready
-would cost time and memory for information that is never read.
+would cost time and memory for information that is never read. Groups still
+report readiness changes to the queue, but under this policy the report only
+wakes a consumer blocked in `release(block=True)` (§6.4); nothing is recorded.
 
 ### 5.2 `strict_order=False` (non-blocking)
 
@@ -80,8 +84,12 @@ Any fully ready group may depart; a not-yet-ready group does not block younger
 ready groups. Among ready groups, arrival order is still respected.
 
 Here the implementation maintains a readiness index: a min-heap of arrival
-sequence numbers plus a sequence→group map, populated lazily by a callback
-fired at the moment a group's readiness count reaches its size.
+sequence numbers plus a sequence→group map, kept in step by a change callback
+fired at the moment a group's readiness count reaches its size, and again if
+`mark_waiting` takes a fully ready group back below it. A withdrawn group
+leaves the map at once and its heap entry is discarded lazily (§6.3); if it
+becomes ready again it keeps its original sequence number, and so its
+arrival-order position among the ready groups.
 
 ### 5.3 Why the switch matters
 
@@ -101,8 +109,9 @@ For the reference Python implementation (`tito/tito.py`):
 | `Group._ready: Dict[member -> bool]` | Single dict serving both membership test and ready flag. |
 | `Group._ready_count: int` | Counter compared against group size; makes the unanimity test O(1) instead of O(k). |
 | `_ready_heap: List[int]` + `_ready_groups: Dict[int, Group]` | Non-strict policy only: lazily populated readiness index keyed by arrival sequence. |
+| `threading.Condition` on the queue lock + `_blocked: int` | Consumers blocked in `release(block=True)` sleep on the condition; the count lets the queue skip the wake-up check entirely while nobody is blocked. |
 
-Three implementation details are worth calling out as the non-obvious parts:
+Four implementation details are worth calling out as the non-obvious parts:
 
 1. **Fused membership-and-readiness map.** `_ready` replaces the conventional
    pair of sets ("all members", "ready members"). A fully ready group under the
@@ -120,15 +129,28 @@ Three implementation details are worth calling out as the non-obvious parts:
    removes the lock-ordering problem between group and queue without forcing
    initial member construction and iteration to run under the queue lock.
 
-3. **Weak-referencing readiness callback with heap compaction.** The group's
+3. **Weak-referencing change callback with heap compaction.** The group's
    readiness callback holds only a weak reference to the queue, so the
    queue→group→callback→queue cycle does not keep discarded queues (and every
    group in them) alive until the cyclic collector runs. Separately, because
    `peek()` only discards stale heap entries when they surface at the top, the
    heap is compacted whenever it exceeds `2 * |ready_groups| + 8` entries. This
-   bounds the readiness index against the workload where groups become ready
-   and are then cancelled repeatedly, which would otherwise grow the heap
-   without limit.
+   bounds the readiness index against the workloads where groups become ready
+   and are then cancelled, or have their readiness withdrawn, repeatedly, which
+   would otherwise grow the heap without limit.
+
+4. **Targeted wake-ups for blocking release.** A consumer calling
+   `release(block=True)` sleeps on a condition variable that shares the queue
+   lock. Rather than broadcasting on every change, which would wake every
+   blocked consumer to contend for a single group, each event that makes a
+   group departable wakes exactly one consumer: a group becoming ready, the
+   cancellation of a strict-order head, and a consumer's own release exposing
+   a further departable group. That last case passes the baton, so a run of
+   ready groups queued behind a strict-order head reaches as many blocked
+   consumers as it has groups. A woken consumer re-tests `peek()` before
+   anything else, even when its wait timed out, so a notification that lands
+   on a consumer whose timeout expired at the same moment is not lost: that
+   consumer takes the group itself.
 
 ## 7. Operations and complexity
 
@@ -138,13 +160,17 @@ For a group of `k` members, `n` groups waiting, `m` total queued members:
 | --- | --- | --- |
 | `admit(group_id, members)` | O(k) | O(k) |
 | `mark_ready(member)` | O(1) | O(log n) amortised |
+| `mark_waiting(member)` | O(1) | O(1) amortised |
 | `mark_group_ready(group_id)` | O(k) | O(k + log n) amortised |
 | `peek()` | O(1) | O(log n) amortised |
 | `release()` | O(k) | O(k + log n) amortised |
 | `release_all()` | O(total released) | O(total released + log n per group) |
 | `cancel(group_id)` | O(k) amortised | O(k) amortised |
 | `clear()` | O(m) | O(m) |
-| `group_of(member)`, `len()`, `in` | O(1) | O(1) |
+| `get(group_id)`, `group_of(member)`, `len()`, `in` | O(1) | O(1) |
+
+`release(block=True)` and `release_all(block=True)` add only the wait itself:
+once a group can depart, they cost the same as the non-blocking calls.
 
 ## 8. Operational sequence (worked example)
 
@@ -178,9 +204,9 @@ professional search. None of these is asserted to be novel.
   "mark member ready" and the queue-level bookkeeping it triggers atomic under
   a single lock while keeping initial member construction and iteration outside
   that lock.
-- **(d)** The bounded lazy readiness index of §6.3: weak-referenced completion
-  callback plus threshold-triggered heap compaction, which keeps the
-  cancellation-heavy workload from growing the index without bound.
+- **(d)** The bounded lazy readiness index of §6.3: weak-referenced change
+  callback plus threshold-triggered heap compaction, which keeps cancellation-
+  and withdrawal-heavy workloads from growing the index without bound.
 - **(e)** Cancellation as the sole, explicitly-scoped exception to unanimous
   readiness that nonetheless preserves group atomicity.
 
@@ -191,7 +217,7 @@ are also the narrower ones.
 
 ## 10. Reference implementation and public disclosure
 
-- Canonical implementation: `tito/tito.py` (Python), 374 lines.
+- Canonical implementation: `tito/tito.py` (Python), 565 lines.
 - Thirteen from-scratch implementations of the same discipline in C, C++, C#,
   Go, Java, JavaScript, Kotlin, PHP, Python, Ruby, Rust, Swift and TypeScript
   live in `examples/`, all producing byte-identical output.

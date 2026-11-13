@@ -14,7 +14,7 @@ final class TitoError extends RuntimeException
  * A set of members that entered the queue together.
  *
  * A group is only ever released as a whole: it departs when, and only
- * when, all of its members have been marked ready.
+ * when, all of its members are marked ready.
  */
 final class Group
 {
@@ -90,6 +90,18 @@ final class Group
         return $this->isReady();
     }
 
+    /** Take back a member's readiness, so the group waits for it again. */
+    public function markWaiting(string $member): void
+    {
+        if (!array_key_exists($member, $this->ready)) {
+            throw new TitoError("$member is not a member of group $this->groupId");
+        }
+        if ($this->ready[$member]) {
+            $this->ready[$member] = false;
+            $this->tally--;
+        }
+    }
+
     public function size(): int
     {
         return count($this->members);
@@ -158,6 +170,16 @@ final class TitoQueue
         return $group->markReady($member);
     }
 
+    /** Take back a queued member's readiness; its group waits for it again. */
+    public function markWaiting(string $member): void
+    {
+        $group = $this->groupOf($member);
+        if ($group === null) {
+            throw new TitoError("$member is not in the queue");
+        }
+        $group->markWaiting($member);
+    }
+
     /** Mark every member of a queued group ready. */
     public function markGroupReady(string $groupId): bool
     {
@@ -169,6 +191,12 @@ final class TitoQueue
             $group->markReady($member);
         }
         return true;
+    }
+
+    /** The waiting group with this id, or null if it is not in the queue. */
+    public function get(string $groupId): ?Group
+    {
+        return $this->groups[$groupId] ?? null;
     }
 
     /** The group a queued member belongs to, or null if not queued. */
@@ -295,6 +323,21 @@ function show(?Group $group): string
     return $group === null ? 'waiting' : (string) $group;
 }
 
+/** Format the optional group returned by get(). */
+function showFound(?Group $group): string
+{
+    return $group === null ? 'none' : (string) $group;
+}
+
+/** Format a group's readiness the same way in every status line. */
+function showStatus(Group $group): string
+{
+    return $group->groupId . ': ' . $group->readyCount() . '/' . $group->size()
+        . ' ready [' . implode(' ', $group->readyMembers()) . ']'
+        . ' waiting [' . implode(' ', $group->waitingMembers()) . ']'
+        . ' is_ready ' . flag($group->isReady());
+}
+
 /**
  * Format the group lists returned by releaseAll() and clear().
  *
@@ -330,6 +373,7 @@ function strictOrderDemo(): void
     echo 'admit ' . $queue->admit('party-2', ['cy']) . "\n";
     echo 'len ' . $queue->size() . ', groups ' . showIds($queue->groups()) . "\n";
     echo 'contains ann ' . flag($queue->contains('ann')) . ', contains zoe ' . flag($queue->contains('zoe')) . "\n";
+    echo 'get party-2 -> ' . showFound($queue->get('party-2')) . "\n";
 
     $party1 = $queue->groupOf('bob');
     echo 'group_of bob -> ' . $party1->groupId . "\n";
@@ -337,33 +381,33 @@ function strictOrderDemo(): void
         . ', contains zoe ' . flag($party1->contains('zoe')) . "\n";
 
     echo 'mark_ready ann -> group ready ' . flag($queue->markReady('ann')) . "\n";
-    echo 'party-1: ' . $party1->readyCount() . '/' . $party1->size()
-        . ' ready [' . implode(' ', $party1->readyMembers()) . ']'
-        . ' waiting [' . implode(' ', $party1->waitingMembers()) . ']'
-        . ' is_ready ' . flag($party1->isReady()) . "\n";
+    echo showStatus($party1) . "\n";
     echo 'peek -> ' . show($queue->peek()) . "\n";
     echo 'release -> ' . show($queue->release()) . "\n";
 
     echo 'party-1.mark_ready bob -> group ready ' . flag($party1->markReady('bob')) . "\n";
-    echo 'party-1: ' . $party1->readyCount() . '/' . $party1->size()
-        . ' ready [' . implode(' ', $party1->readyMembers()) . ']'
-        . ' waiting [' . implode(' ', $party1->waitingMembers()) . ']'
-        . ' is_ready ' . flag($party1->isReady()) . "\n";
+    echo showStatus($party1) . "\n";
     echo 'peek -> ' . show($queue->peek()) . "\n";
     echo 'release -> ' . show($queue->release()) . "\n";
 
     echo 'mark_group_ready party-2 -> ' . flag($queue->markGroupReady('party-2')) . "\n";
     echo 'release_all -> ' . showAll($queue->releaseAll()) . "\n";
+    echo 'get party-2 -> ' . showFound($queue->get('party-2')) . "\n";
     echo 'len ' . $queue->size() . "\n";
 }
 
-/** Without strict order, ready party-4 leaves ahead of waiting party-3. */
+/**
+ * Without strict order, ready party-4 leaves ahead of waiting party-3.
+ *
+ * Taking back a member's readiness makes party-3 wait for it again.
+ */
 function relaxedOrderDemo(): void
 {
     echo "-- relaxed order --\n";
     $queue = new TitoQueue(false);
     echo 'strict_order ' . flag($queue->strictOrder) . "\n";
-    echo 'admit ' . $queue->admit('party-3', ['dee', 'eli']) . "\n";
+    $party3 = $queue->admit('party-3', ['dee', 'eli']);
+    echo 'admit ' . $party3 . "\n";
     echo 'admit ' . $queue->admit('party-4', ['fay']) . "\n";
 
     echo 'mark_group_ready party-4 -> ' . flag($queue->markGroupReady('party-4')) . "\n";
@@ -373,6 +417,14 @@ function relaxedOrderDemo(): void
     echo 'mark_ready dee -> group ready ' . flag($queue->markReady('dee')) . "\n";
     echo 'release -> ' . show($queue->release()) . "\n";
     echo 'mark_ready eli -> group ready ' . flag($queue->markReady('eli')) . "\n";
+    $queue->markWaiting('dee');
+    echo "mark_waiting dee\n";
+    echo showStatus($party3) . "\n";
+    echo 'release -> ' . show($queue->release()) . "\n";
+    $party3->markWaiting('eli');
+    echo "party-3.mark_waiting eli\n";
+    echo showStatus($party3) . "\n";
+    echo 'mark_group_ready party-3 -> ' . flag($queue->markGroupReady('party-3')) . "\n";
     echo 'release_all -> ' . showAll($queue->releaseAll()) . "\n";
     echo 'len ' . $queue->size() . "\n";
 }
@@ -422,7 +474,9 @@ function errorDemo(): void
     attempt('admit party-9 [jay jay]', fn () => $queue->admit('party-9', ['jay', 'jay']));
     attempt('admit party-9 [kim]', fn () => $queue->admit('party-9', ['kim']));
     attempt('mark_ready zoe', fn () => $queue->markReady('zoe'));
+    attempt('mark_waiting zoe', fn () => $queue->markWaiting('zoe'));
     attempt('party-8.mark_ready zoe', fn () => $queue->groupOf('kim')->markReady('zoe'));
+    attempt('party-8.mark_waiting zoe', fn () => $queue->groupOf('kim')->markWaiting('zoe'));
     attempt('mark_group_ready party-9', fn () => $queue->markGroupReady('party-9'));
     attempt('cancel party-9', fn () => $queue->cancel('party-9'));
 }

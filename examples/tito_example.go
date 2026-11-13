@@ -10,7 +10,7 @@ import (
 )
 
 // group is a set of members admitted together. It departs only once every
-// member has been marked ready.
+// member is marked ready.
 type group struct {
 	groupID    string
 	members    []string
@@ -74,6 +74,19 @@ func (g *group) markReady(member string) (bool, error) {
 		g.readyCount++
 	}
 	return g.isReady(), nil
+}
+
+// markWaiting takes back a member's readiness, so the group waits for it again.
+func (g *group) markWaiting(member string) error {
+	ready, ok := g.ready[member]
+	if !ok {
+		return fmt.Errorf("%s is not a member of group %s", member, g.groupID)
+	}
+	if ready {
+		g.ready[member] = false
+		g.readyCount--
+	}
+	return nil
 }
 
 func (g *group) size() int {
@@ -145,6 +158,15 @@ func (q *titoQueue) markReady(member string) (bool, error) {
 	return g.markReady(member)
 }
 
+// markWaiting takes back a queued member's readiness; its group waits for it again.
+func (q *titoQueue) markWaiting(member string) error {
+	g := q.groupOf(member)
+	if g == nil {
+		return fmt.Errorf("%s is not in the queue", member)
+	}
+	return g.markWaiting(member)
+}
+
 // markGroupReady marks every member of a queued group ready.
 func (q *titoQueue) markGroupReady(groupID string) (bool, error) {
 	g, ok := q.byID[groupID]
@@ -157,6 +179,11 @@ func (q *titoQueue) markGroupReady(groupID string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// get returns the waiting group with this id, or nil if it is not in the queue.
+func (q *titoQueue) get(groupID string) *group {
+	return q.byID[groupID]
 }
 
 // groupOf returns the group a queued member belongs to, or nil.
@@ -267,6 +294,13 @@ func mustBool(value bool, err error) bool {
 	return value
 }
 
+// mustOK panics on a markWaiting the demo assumes succeeds.
+func mustOK(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
 func flag(value bool) string {
 	if value {
 		return "true"
@@ -280,6 +314,21 @@ func show(g *group) string {
 		return "waiting"
 	}
 	return g.String()
+}
+
+// showFound formats the optional group returned by get.
+func showFound(g *group) string {
+	if g == nil {
+		return "none"
+	}
+	return g.String()
+}
+
+// showStatus formats a group's readiness the same way in every status line.
+func showStatus(g *group) string {
+	return fmt.Sprintf("%s: %d/%d ready [%s] waiting [%s] is_ready %s",
+		g.groupID, g.readyCount, g.size(), strings.Join(g.readyMembers(), " "),
+		strings.Join(g.waitingMembers(), " "), flag(g.isReady()))
 }
 
 // showAll formats the group lists returned by releaseAll and clear.
@@ -314,6 +363,7 @@ func strictOrderDemo() {
 	fmt.Printf("admit %s\n", must(queue.admit("party-2", []string{"cy"})))
 	fmt.Printf("len %d, groups %s\n", queue.count(), showIDs(queue.groups()))
 	fmt.Printf("contains ann %s, contains zoe %s\n", flag(queue.contains("ann")), flag(queue.contains("zoe")))
+	fmt.Printf("get party-2 -> %s\n", showFound(queue.get("party-2")))
 
 	party1 := queue.groupOf("bob")
 	fmt.Printf("group_of bob -> %s\n", party1.groupID)
@@ -321,30 +371,30 @@ func strictOrderDemo() {
 		party1.size(), flag(party1.contains("ann")), flag(party1.contains("zoe")))
 
 	fmt.Printf("mark_ready ann -> group ready %s\n", flag(mustBool(queue.markReady("ann"))))
-	fmt.Printf("party-1: %d/%d ready [%s] waiting [%s] is_ready %s\n",
-		party1.readyCount, party1.size(), strings.Join(party1.readyMembers(), " "),
-		strings.Join(party1.waitingMembers(), " "), flag(party1.isReady()))
+	fmt.Println(showStatus(party1))
 	fmt.Printf("peek -> %s\n", show(queue.peek()))
 	fmt.Printf("release -> %s\n", show(queue.release()))
 
 	fmt.Printf("party-1.mark_ready bob -> group ready %s\n", flag(mustBool(party1.markReady("bob"))))
-	fmt.Printf("party-1: %d/%d ready [%s] waiting [%s] is_ready %s\n",
-		party1.readyCount, party1.size(), strings.Join(party1.readyMembers(), " "),
-		strings.Join(party1.waitingMembers(), " "), flag(party1.isReady()))
+	fmt.Println(showStatus(party1))
 	fmt.Printf("peek -> %s\n", show(queue.peek()))
 	fmt.Printf("release -> %s\n", show(queue.release()))
 
 	fmt.Printf("mark_group_ready party-2 -> %s\n", flag(mustBool(queue.markGroupReady("party-2"))))
 	fmt.Printf("release_all -> %s\n", showAll(queue.releaseAll()))
+	fmt.Printf("get party-2 -> %s\n", showFound(queue.get("party-2")))
 	fmt.Printf("len %d\n", queue.count())
 }
 
 // relaxedOrderDemo shows a ready party-4 leaving ahead of waiting party-3.
+//
+// Taking back a member's readiness makes party-3 wait for it again.
 func relaxedOrderDemo() {
 	fmt.Println("-- relaxed order --")
 	queue := newTitoQueue(false)
 	fmt.Printf("strict_order %s\n", flag(queue.strictOrder))
-	fmt.Printf("admit %s\n", must(queue.admit("party-3", []string{"dee", "eli"})))
+	party3 := must(queue.admit("party-3", []string{"dee", "eli"}))
+	fmt.Printf("admit %s\n", party3)
 	fmt.Printf("admit %s\n", must(queue.admit("party-4", []string{"fay"})))
 
 	fmt.Printf("mark_group_ready party-4 -> %s\n", flag(mustBool(queue.markGroupReady("party-4"))))
@@ -354,6 +404,14 @@ func relaxedOrderDemo() {
 	fmt.Printf("mark_ready dee -> group ready %s\n", flag(mustBool(queue.markReady("dee"))))
 	fmt.Printf("release -> %s\n", show(queue.release()))
 	fmt.Printf("mark_ready eli -> group ready %s\n", flag(mustBool(queue.markReady("eli"))))
+	mustOK(queue.markWaiting("dee"))
+	fmt.Println("mark_waiting dee")
+	fmt.Println(showStatus(party3))
+	fmt.Printf("release -> %s\n", show(queue.release()))
+	mustOK(party3.markWaiting("eli"))
+	fmt.Println("party-3.mark_waiting eli")
+	fmt.Println(showStatus(party3))
+	fmt.Printf("mark_group_ready party-3 -> %s\n", flag(mustBool(queue.markGroupReady("party-3"))))
 	fmt.Printf("release_all -> %s\n", showAll(queue.releaseAll()))
 	fmt.Printf("len %d\n", queue.count())
 }
@@ -394,7 +452,9 @@ func errorDemo() {
 	attempt("admit party-9 [jay jay]", func() error { _, err := queue.admit("party-9", []string{"jay", "jay"}); return err })
 	attempt("admit party-9 [kim]", func() error { _, err := queue.admit("party-9", []string{"kim"}); return err })
 	attempt("mark_ready zoe", func() error { _, err := queue.markReady("zoe"); return err })
+	attempt("mark_waiting zoe", func() error { return queue.markWaiting("zoe") })
 	attempt("party-8.mark_ready zoe", func() error { _, err := queue.groupOf("kim").markReady("zoe"); return err })
+	attempt("party-8.mark_waiting zoe", func() error { return queue.groupOf("kim").markWaiting("zoe") })
 	attempt("mark_group_ready party-9", func() error { _, err := queue.markGroupReady("party-9"); return err })
 	attempt("cancel party-9", func() error { _, err := queue.cancel("party-9"); return err })
 }

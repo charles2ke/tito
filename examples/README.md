@@ -14,10 +14,10 @@ plain checkout) to solve five small, realistic problems:
 
 | Scenario | Discipline it shows |
 | -------- | ------------------- |
-| Restaurant waitlist | strict order: a party is seated whole, and never overtaken by a later party |
+| Restaurant waitlist | strict order: a party is seated whole, and never overtaken by a later party; a guest who steps out is marked waiting again |
 | Matchmaking lobbies | relaxed order: a complete lobby starts without waiting for an older, half-full one |
 | Batch publishing | all-or-nothing: every shard publishes together, and `cancel` rolls back the whole batch |
-| Parallel fan-out | thread safety: workers mark their own part ready, the request is answered once all parts land |
+| Parallel fan-out | thread safety: workers mark their own part ready, and the handler sleeps in `release(block=True)` until all parts land |
 | Guarded admission | invalid work is refused instead of corrupting a queued group |
 
 ```bash
@@ -30,6 +30,7 @@ It prints, from the repository root:
 -- restaurant seating (strict order) --
 ready to seat: None
 still waiting on: ['priya']
+priya arrived, raj stepped out, still waiting on: ['raj']
 seat mehta-party: asha raj priya
 seat okafor-party: ngozi chidi
 parties left on the waitlist: 0
@@ -72,6 +73,7 @@ admit party-1 [ann bob]
 admit party-2 [cy]
 len 2, groups party-1 party-2
 contains ann true, contains zoe false
+get party-2 -> party-2 [cy]
 group_of bob -> party-1
 party-1: size 2, contains ann true, contains zoe false
 mark_ready ann -> group ready false
@@ -84,6 +86,7 @@ peek -> party-1 [ann bob]
 release -> party-1 [ann bob]
 mark_group_ready party-2 -> true
 release_all -> party-2 [cy]
+get party-2 -> none
 len 0
 
 -- relaxed order --
@@ -96,6 +99,12 @@ release -> party-4 [fay]
 mark_ready dee -> group ready false
 release -> waiting
 mark_ready eli -> group ready true
+mark_waiting dee
+party-3: 1/2 ready [eli] waiting [dee] is_ready false
+release -> waiting
+party-3.mark_waiting eli
+party-3: 0/2 ready [] waiting [dee eli] is_ready false
+mark_group_ready party-3 -> true
 release_all -> party-3 [dee eli]
 len 0
 
@@ -116,7 +125,9 @@ admit party-9 [] -> group party-9 must contain at least one member
 admit party-9 [jay jay] -> group party-9 contains duplicate members
 admit party-9 [kim] -> members already in the queue: kim
 mark_ready zoe -> zoe is not in the queue
+mark_waiting zoe -> zoe is not in the queue
 party-8.mark_ready zoe -> zoe is not a member of group party-8
+party-8.mark_waiting zoe -> zoe is not a member of group party-8
 mark_group_ready party-9 -> group party-9 is not in the queue
 cancel party-9 -> group party-9 is not in the queue
 ```
@@ -152,13 +163,17 @@ Every method of the package's public API:
 - `admit(group_id, members)` - members enter as one group, in arrival order.
 - `mark_ready(member)` / `mark_group_ready(group_id)` - signal readiness;
   marking a member reports whether its whole group has become ready.
+- `mark_waiting(member)` - take a member's readiness back, so its group keeps
+  its place in line but cannot depart until the member is ready again.
 - `peek()` / `release()` / `release_all()` - a group is only ever handed back
   when *all* of its members are ready, so groups leave whole and in order.
 - `cancel(group_id)` / `clear()` - withdraw waiting groups; a cancelled group
   still leaves as a whole, ready or not.
-- `group_of(member)`, `groups`, queue length and membership tests.
+- `get(group_id)`, `group_of(member)`, `groups`, queue length and membership
+  tests.
 - On a group: `members`, `ready_members`, `waiting_members`, `ready_count`,
-  `is_ready`, `mark_ready(member)`, size and membership tests.
+  `is_ready`, `mark_ready(member)`, `mark_waiting(member)`, size and
+  membership tests.
 - Both ordering policies: strict order (head-of-line FIFO, the default), and
   relaxed order, where a ready group is not held up by an older group that is
   still waiting.
@@ -167,6 +182,7 @@ Every method of the package's public API:
 
 They deliberately leave out the parts of the Python package that are about
 performance and concurrency rather than the discipline itself: the package
-indexes ready groups in an arrival-ordered heap and is thread-safe, while the
-examples just scan the waiting groups in arrival order and assume a single
-thread. See the [top-level README](../README.md) for those.
+indexes ready groups in an arrival-ordered heap, is thread-safe, and can block
+a consumer in `release(block=True)` until a group departs, while the examples
+just scan the waiting groups in arrival order and assume a single thread. See
+the [top-level README](../README.md) for those.

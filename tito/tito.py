@@ -19,13 +19,15 @@ Two ordering policies are supported:
 Both :class:`TitoQueue` and :class:`Group` are thread-safe. A queue and the
 groups it has admitted share one reentrant lock, so marking a member ready
 and the queue bookkeeping it triggers happen as a single atomic step, and no
-group can be released twice by racing callers.
+group can be released twice by racing callers. Consumers can sleep in
+``release(block=True)`` until a group is able to depart instead of polling.
 """
 
 from __future__ import annotations
 
 import heapq
 import threading
+import time
 import weakref
 from collections import OrderedDict
 from typing import Callable, Dict, Hashable, Iterable, Iterator, List, Optional, Tuple
@@ -46,11 +48,31 @@ def _is_hashable(value: object) -> bool:
     return True
 
 
+def _check_wait(block: bool, timeout: Optional[float]) -> None:
+    """Refuse a ``timeout`` that would be ignored, or that cannot be waited."""
+    if timeout is None:
+        return
+    if not block:
+        raise TitoError(
+            f"timeout={timeout!r} only applies when waiting; pass block=True "
+            f"as well, or drop the timeout to return straight away"
+        )
+    try:
+        valid = timeout >= 0
+    except TypeError:
+        valid = False
+    if not valid:
+        raise TitoError(
+            f"timeout must be None or a non-negative number of seconds, "
+            f"not {timeout!r}"
+        )
+
+
 class Group:
     """A set of members that entered the queue together.
 
     A group is only ever released as a whole: it departs when, and only
-    when, all of its members have been marked ready.
+    when, all of its members are marked ready.
     """
 
     __slots__ = (
@@ -59,7 +81,7 @@ class Group:
         "_ready",
         "_ready_count",
         "_sequence",
-        "_on_ready",
+        "_on_change",
         "_lock",
     )
 
@@ -100,7 +122,9 @@ class Group:
         self._ready = ready
         self._ready_count = 0
         self._sequence = sequence
-        self._on_ready: Optional[Callable[["Group"], None]] = None
+        # Called with (group, is_ready) whenever the whole group becomes ready
+        # or stops being ready, so the queue holding it can keep up.
+        self._on_change: Optional[Callable[["Group", bool], None]] = None
         # Reentrant because the readiness callback re-enters the queue, which
         # shares this very lock once the group has been admitted.
         self._lock: "threading.RLock" = threading.RLock()
@@ -148,27 +172,41 @@ class Group:
         arrive afterwards still get True, but the queue is notified once.
         """
         with self._lock:
-            try:
-                already = self._ready[member]
-            except KeyError:
-                raise TitoError(
-                    f"{member!r} is not a member of group {self.group_id!r}; "
-                    f"its members are {list(self._members)!r}"
-                ) from None
-            except TypeError:
-                raise TitoError(
-                    f"{member!r} is not a member of group {self.group_id!r}; "
-                    f"its members are {list(self._members)!r}"
-                ) from None
-            if already:
+            if self._member_is_ready(member):
                 return self._ready_count == len(self._members)
             self._ready[member] = True
             self._ready_count += 1
             if self._ready_count != len(self._members):
                 return False
-            if self._on_ready is not None:
-                self._on_ready(self)
+            if self._on_change is not None:
+                self._on_change(self, True)
             return True
+
+    def mark_waiting(self, member: Hashable) -> None:
+        """Mark ``member`` as not ready after all, so the group cannot depart.
+
+        The group stays whole and keeps its place in the queue; it can only
+        depart once ``member`` is marked ready again. Marking a member that
+        is already waiting does nothing.
+        """
+        with self._lock:
+            if not self._member_is_ready(member):
+                return
+            was_ready = self._ready_count == len(self._members)
+            self._ready[member] = False
+            self._ready_count -= 1
+            if was_ready and self._on_change is not None:
+                self._on_change(self, False)
+
+    def _member_is_ready(self, member: Hashable) -> bool:
+        """Whether ``member`` is marked ready; refuses anyone not in the group."""
+        try:
+            return self._ready[member]
+        except (KeyError, TypeError):
+            raise TitoError(
+                f"{member!r} is not a member of group {self.group_id!r}; "
+                f"its members are {list(self._members)!r}"
+            ) from None
 
     def __len__(self) -> int:
         return len(self._members)
@@ -193,16 +231,16 @@ class Group:
         )
 
 
-def _make_ready_callback(queue: "TitoQueue") -> Callable[["Group"], None]:
+def _make_change_callback(queue: "TitoQueue") -> Callable[["Group", bool], None]:
     """Build a group callback that only weakly references ``queue``."""
     queue_ref = weakref.ref(queue)
 
-    def on_ready(group: "Group") -> None:
+    def on_change(group: "Group", ready: bool) -> None:
         owner = queue_ref()
         if owner is not None:
-            owner._note_ready(group)
+            owner._note_change(group, ready)
 
-    return on_ready
+    return on_change
 
 
 class TitoQueue:
@@ -215,8 +253,10 @@ class TitoQueue:
         "_sequence",
         "_ready_heap",
         "_ready_groups",
-        "_on_ready_callback",
+        "_on_change_callback",
         "_lock",
+        "_departure",
+        "_blocked",
         "__weakref__",
     )
 
@@ -225,6 +265,11 @@ class TitoQueue:
         # Reentrant: ``release`` calls ``peek``, and a group notifying the
         # queue that it became ready already holds this same lock.
         self._lock = threading.RLock()
+        # Consumers blocked in ``release(block=True)`` sleep on this until a
+        # group can depart. ``_blocked`` counts them, so that nobody pays to
+        # wake a consumer when none is waiting.
+        self._departure = threading.Condition(self._lock)
+        self._blocked = 0
         self._groups: "OrderedDict[Hashable, Group]" = OrderedDict()
         self._member_index: Dict[Hashable, Hashable] = {}
         self._sequence = 0
@@ -236,9 +281,7 @@ class TitoQueue:
         # Groups hold this callback, so it must not hold a strong reference
         # back to the queue: that cycle would keep released queues (and every
         # group still in them) alive until the cyclic collector runs.
-        self._on_ready_callback: Optional[Callable[[Group], None]] = (
-            None if self._strict_order else _make_ready_callback(self)
-        )
+        self._on_change_callback = _make_change_callback(self)
 
     @property
     def strict_order(self) -> bool:
@@ -278,19 +321,22 @@ class TitoQueue:
             self._groups[group_id] = group
             for member in group.members:
                 member_index[member] = group_id
-            group._on_ready = self._on_ready_callback
+            group._on_change = self._on_change_callback
             return group
 
     def mark_ready(self, member: Hashable) -> bool:
         """Mark a queued ``member`` ready. Returns True if its group is ready."""
         with self._lock:
-            group = self.group_of(member)
-            if group is None:
-                raise TitoError(
-                    f"{member!r} is not in the queue; admit the group it "
-                    f"belongs to first, or it may already have departed"
-                )
-            return group.mark_ready(member)
+            return self._holder_of(member).mark_ready(member)
+
+    def mark_waiting(self, member: Hashable) -> None:
+        """Mark a queued ``member`` as not ready after all.
+
+        Its group keeps its place in the queue, but cannot depart until
+        ``member`` is marked ready again.
+        """
+        with self._lock:
+            self._holder_of(member).mark_waiting(member)
 
     def mark_group_ready(self, group_id: Hashable) -> bool:
         """Mark every member of ``group_id`` ready."""
@@ -316,6 +362,11 @@ class TitoQueue:
                 return None
             return self._groups[group_id]
 
+    def get(self, group_id: Hashable) -> Optional[Group]:
+        """The waiting group admitted as ``group_id``, or None if not queued."""
+        with self._lock:
+            return self._find(group_id)
+
     def cancel(self, group_id: Hashable) -> Group:
         """Withdraw a waiting group from the queue and return it.
 
@@ -330,6 +381,8 @@ class TitoQueue:
                     f"admitted, or it has already departed"
                 )
             self._remove(group)
+            # Cancelling a strict-order head can free the ready group behind it.
+            self._wake_next()
             return group
 
     def clear(self) -> List[Group]:
@@ -337,7 +390,7 @@ class TitoQueue:
         with self._lock:
             cleared = list(self._groups.values())
             for group in cleared:
-                group._on_ready = None
+                group._on_change = None
             self._groups.clear()
             self._member_index.clear()
             self._ready_groups.clear()
@@ -361,24 +414,52 @@ class TitoQueue:
                 heapq.heappop(heap)
             return None
 
-    def release(self) -> Optional[Group]:
-        """Release the next fully ready group, or None if none can depart."""
+    def release(
+        self, block: bool = False, timeout: Optional[float] = None
+    ) -> Optional[Group]:
+        """Release the next fully ready group, or None if none can depart.
+
+        By default this returns straight away. With ``block=True`` it sleeps
+        until a group can depart, giving up and returning None once
+        ``timeout`` seconds have passed, if a timeout is given.
+        """
+        _check_wait(block, timeout)
         with self._lock:
-            group = self.peek()
-            if group is None:
+            if block and not self._wait_for_departure(timeout):
                 return None
-            self._remove(group)
+            group = self._release_next()
+            if group is not None:
+                self._wake_next()
             return group
 
-    def release_all(self) -> List[Group]:
-        """Release every group that can currently depart, in order."""
+    def release_all(
+        self, block: bool = False, timeout: Optional[float] = None
+    ) -> List[Group]:
+        """Release every group that can currently depart, in order.
+
+        With ``block=True`` it first waits, as :meth:`release` does, until at
+        least one group can depart; an empty list then means it timed out.
+        """
+        _check_wait(block, timeout)
         released: List[Group] = []
         with self._lock:
+            if block and not self._wait_for_departure(timeout):
+                return released
             while True:
-                group = self.release()
+                group = self._release_next()
                 if group is None:
                     return released
                 released.append(group)
+
+    def _holder_of(self, member: Hashable) -> Group:
+        """The group holding a queued ``member``; refuses anyone else."""
+        group = self.group_of(member)
+        if group is None:
+            raise TitoError(
+                f"{member!r} is not in the queue; admit the group it "
+                f"belongs to first, or it may already have departed"
+            )
+        return group
 
     def _find(self, group_id: Hashable) -> Optional[Group]:
         """Look up a waiting group; unhashable ids simply match nothing."""
@@ -387,20 +468,62 @@ class TitoQueue:
         except TypeError:
             return None
 
-    def _note_ready(self, group: Group) -> None:
-        """Record that ``group`` became ready, keeping arrival order."""
-        sequence = group.sequence
-        if sequence in self._ready_groups:
-            return
-        self._ready_groups[sequence] = group
-        heapq.heappush(self._ready_heap, sequence)
+    def _release_next(self) -> Optional[Group]:
+        """Remove and return the next group that can depart, if any."""
+        group = self.peek()
+        if group is not None:
+            self._remove(group)
+        return group
+
+    def _wait_for_departure(self, timeout: Optional[float]) -> bool:
+        """Sleep until a group can depart; False if ``timeout`` ran out first.
+
+        The caller holds the lock, which the condition releases while asleep.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        self._blocked += 1
+        try:
+            while self.peek() is None:
+                if deadline is None:
+                    self._departure.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._departure.wait(min(remaining, threading.TIMEOUT_MAX))
+            return True
+        finally:
+            self._blocked -= 1
+
+    def _wake_next(self) -> None:
+        """Wake one blocked consumer if a group is able to depart.
+
+        Every change that lets a group depart wakes one consumer, and each
+        consumer that releases a group passes the baton on through here, so
+        a run of ready groups reaches as many blocked consumers as it can.
+        """
+        if self._blocked and self.peek() is not None:
+            self._departure.notify()
+
+    def _note_change(self, group: Group, ready: bool) -> None:
+        """Keep the ready index in step with ``group``, and wake a consumer."""
+        if not self._strict_order:
+            sequence = group.sequence
+            if not ready:
+                if self._ready_groups.pop(sequence, None) is not None:
+                    self._compact_ready_heap()
+            elif sequence not in self._ready_groups:
+                self._ready_groups[sequence] = group
+                heapq.heappush(self._ready_heap, sequence)
+        if ready:
+            self._wake_next()
 
     def _remove(self, group: Group) -> None:
         del self._groups[group.group_id]
         member_index = self._member_index
         for member in group.members:
             del member_index[member]
-        group._on_ready = None
+        group._on_change = None
         if self._ready_groups.pop(group.sequence, None) is not None:
             self._compact_ready_heap()
 
@@ -408,8 +531,8 @@ class TitoQueue:
         """Drop stale sequences so the ready heap cannot grow without bound.
 
         ``peek`` only discards stale entries once they reach the top of the
-        heap, so departed groups would otherwise leave their sequence numbers
-        behind forever.
+        heap, so groups that departed or stopped being ready would otherwise
+        leave their sequence numbers behind forever.
         """
         if len(self._ready_heap) <= 2 * len(self._ready_groups) + 8:
             return

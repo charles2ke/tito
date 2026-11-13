@@ -10,7 +10,7 @@ class TitoError extends Error {}
  * A set of members that entered the queue together.
  *
  * A group is only ever released as a whole: it departs when, and only
- * when, all of its members have been marked ready.
+ * when, all of its members are marked ready.
  */
 class Group {
   readonly groupId: string;
@@ -69,6 +69,17 @@ class Group {
     return this.isReady;
   }
 
+  /** Take back a member's readiness, so the group waits for it again. */
+  markWaiting(member: string): void {
+    if (!this.ready.has(member)) {
+      throw new TitoError(`${member} is not a member of group ${this.groupId}`);
+    }
+    if (this.ready.get(member)) {
+      this.ready.set(member, false);
+      this.tally -= 1;
+    }
+  }
+
   get size(): number {
     return this.members.length;
   }
@@ -125,6 +136,15 @@ class TitoQueue {
     return group.markReady(member);
   }
 
+  /** Take back a queued member's readiness; its group waits for it again. */
+  markWaiting(member: string): void {
+    const group = this.groupOf(member);
+    if (group === null) {
+      throw new TitoError(`${member} is not in the queue`);
+    }
+    group.markWaiting(member);
+  }
+
   /** Mark every member of a queued group ready. */
   markGroupReady(groupId: string): boolean {
     const group = this.groupsById.get(groupId);
@@ -135,6 +155,11 @@ class TitoQueue {
       group.markReady(member);
     }
     return true;
+  }
+
+  /** The waiting group with this id, or null if it is not in the queue. */
+  get(groupId: string): Group | null {
+    return this.groupsById.get(groupId) ?? null;
   }
 
   /** The group a queued member belongs to, or null if not queued. */
@@ -235,6 +260,17 @@ function show(group: Group | null): string {
   return group === null ? 'waiting' : `${group}`;
 }
 
+/** Format the optional group returned by get(). */
+function showFound(group: Group | null): string {
+  return group === null ? 'none' : `${group}`;
+}
+
+/** Format a group's readiness the same way in every status line. */
+function showStatus(group: Group): string {
+  return `${group.groupId}: ${group.readyCount}/${group.size} ready [${group.readyMembers.join(' ')}] `
+    + `waiting [${group.waitingMembers.join(' ')}] is_ready ${flag(group.isReady)}`;
+}
+
 /** Format the group lists returned by releaseAll() and clear(). */
 function showAll(groups: Group[]): string {
   if (groups.length === 0) {
@@ -259,6 +295,7 @@ function strictOrderDemo(): void {
   console.log(`admit ${queue.admit('party-2', ['cy'])}`);
   console.log(`len ${queue.size}, groups ${showIds(queue.groups)}`);
   console.log(`contains ann ${flag(queue.contains('ann'))}, contains zoe ${flag(queue.contains('zoe'))}`);
+  console.log(`get party-2 -> ${showFound(queue.get('party-2'))}`);
 
   const party1 = queue.groupOf('bob')!;
   console.log(`group_of bob -> ${party1.groupId}`);
@@ -266,28 +303,32 @@ function strictOrderDemo(): void {
     + `contains zoe ${flag(party1.contains('zoe'))}`);
 
   console.log(`mark_ready ann -> group ready ${flag(queue.markReady('ann'))}`);
-  console.log(`party-1: ${party1.readyCount}/${party1.size} ready [${party1.readyMembers.join(' ')}] `
-    + `waiting [${party1.waitingMembers.join(' ')}] is_ready ${flag(party1.isReady)}`);
+  console.log(showStatus(party1));
   console.log(`peek -> ${show(queue.peek())}`);
   console.log(`release -> ${show(queue.release())}`);
 
   console.log(`party-1.mark_ready bob -> group ready ${flag(party1.markReady('bob'))}`);
-  console.log(`party-1: ${party1.readyCount}/${party1.size} ready [${party1.readyMembers.join(' ')}] `
-    + `waiting [${party1.waitingMembers.join(' ')}] is_ready ${flag(party1.isReady)}`);
+  console.log(showStatus(party1));
   console.log(`peek -> ${show(queue.peek())}`);
   console.log(`release -> ${show(queue.release())}`);
 
   console.log(`mark_group_ready party-2 -> ${flag(queue.markGroupReady('party-2'))}`);
   console.log(`release_all -> ${showAll(queue.releaseAll())}`);
+  console.log(`get party-2 -> ${showFound(queue.get('party-2'))}`);
   console.log(`len ${queue.size}`);
 }
 
-/** Without strict order, ready party-4 leaves ahead of waiting party-3. */
+/**
+ * Without strict order, ready party-4 leaves ahead of waiting party-3.
+ *
+ * Taking back a member's readiness makes party-3 wait for it again.
+ */
 function relaxedOrderDemo(): void {
   console.log('-- relaxed order --');
   const queue = new TitoQueue(false);
   console.log(`strict_order ${flag(queue.strictOrder)}`);
-  console.log(`admit ${queue.admit('party-3', ['dee', 'eli'])}`);
+  const party3 = queue.admit('party-3', ['dee', 'eli']);
+  console.log(`admit ${party3}`);
   console.log(`admit ${queue.admit('party-4', ['fay'])}`);
 
   console.log(`mark_group_ready party-4 -> ${flag(queue.markGroupReady('party-4'))}`);
@@ -297,6 +338,14 @@ function relaxedOrderDemo(): void {
   console.log(`mark_ready dee -> group ready ${flag(queue.markReady('dee'))}`);
   console.log(`release -> ${show(queue.release())}`);
   console.log(`mark_ready eli -> group ready ${flag(queue.markReady('eli'))}`);
+  queue.markWaiting('dee');
+  console.log('mark_waiting dee');
+  console.log(showStatus(party3));
+  console.log(`release -> ${show(queue.release())}`);
+  party3.markWaiting('eli');
+  console.log('party-3.mark_waiting eli');
+  console.log(showStatus(party3));
+  console.log(`mark_group_ready party-3 -> ${flag(queue.markGroupReady('party-3'))}`);
   console.log(`release_all -> ${showAll(queue.releaseAll())}`);
   console.log(`len ${queue.size}`);
 }
@@ -342,7 +391,9 @@ function errorDemo(): void {
   attempt('admit party-9 [jay jay]', () => queue.admit('party-9', ['jay', 'jay']));
   attempt('admit party-9 [kim]', () => queue.admit('party-9', ['kim']));
   attempt('mark_ready zoe', () => queue.markReady('zoe'));
+  attempt('mark_waiting zoe', () => queue.markWaiting('zoe'));
   attempt('party-8.mark_ready zoe', () => queue.groupOf('kim')!.markReady('zoe'));
+  attempt('party-8.mark_waiting zoe', () => queue.groupOf('kim')!.markWaiting('zoe'));
   attempt('mark_group_ready party-9', () => queue.markGroupReady('party-9'));
   attempt('cancel party-9', () => queue.cancel('party-9'));
 }

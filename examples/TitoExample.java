@@ -22,7 +22,7 @@ public final class TitoExample {
 
     /**
      * A set of members that entered the queue together. A group is only ever
-     * released as a whole: it departs once every member has been marked ready.
+     * released as a whole: it departs once every member is marked ready.
      */
     static final class Group {
         private final String groupId;
@@ -106,6 +106,18 @@ public final class TitoExample {
             return isReady();
         }
 
+        /** Take back a member's readiness, so the group waits for it again. */
+        void markWaiting(String member) {
+            Boolean wasReady = ready.get(member);
+            if (wasReady == null) {
+                throw new TitoException(member + " is not a member of group " + groupId);
+            }
+            if (wasReady) {
+                ready.put(member, false);
+                readyCount--;
+            }
+        }
+
         boolean contains(String member) {
             return ready.containsKey(member);
         }
@@ -171,6 +183,15 @@ public final class TitoExample {
             return group.markReady(member);
         }
 
+        /** Take back a queued member's readiness; its group waits for it again. */
+        void markWaiting(String member) {
+            Group group = groupOf(member);
+            if (group == null) {
+                throw new TitoException(member + " is not in the queue");
+            }
+            group.markWaiting(member);
+        }
+
         /** Mark every member of a queued group ready. */
         boolean markGroupReady(String groupId) {
             Group group = groups.get(groupId);
@@ -181,6 +202,11 @@ public final class TitoExample {
                 group.markReady(member);
             }
             return true;
+        }
+
+        /** The waiting group with this id, or null if it is not in the queue. */
+        Group get(String groupId) {
+            return groups.get(groupId);
         }
 
         /** The group a queued member belongs to, or null if not queued. */
@@ -286,6 +312,7 @@ public final class TitoExample {
         System.out.println("admit " + queue.admit("party-2", List.of("cy")));
         System.out.println("len " + queue.size() + ", groups " + showIds(queue.groups()));
         System.out.println("contains ann " + flag(queue.contains("ann")) + ", contains zoe " + flag(queue.contains("zoe")));
+        System.out.println("get party-2 -> " + showFound(queue.get("party-2")));
 
         Group party1 = queue.groupOf("bob");
         System.out.println("group_of bob -> " + party1.groupId());
@@ -293,30 +320,29 @@ public final class TitoExample {
                 + ", contains zoe " + flag(party1.contains("zoe")));
 
         System.out.println("mark_ready ann -> group ready " + flag(queue.markReady("ann")));
-        System.out.println("party-1: " + party1.readyCount() + "/" + party1.size() + " ready ["
-                + String.join(" ", party1.readyMembers()) + "] waiting [" + String.join(" ", party1.waitingMembers())
-                + "] is_ready " + flag(party1.isReady()));
+        System.out.println(showStatus(party1));
         System.out.println("peek -> " + show(queue.peek()));
         System.out.println("release -> " + show(queue.release()));
 
         System.out.println("party-1.mark_ready bob -> group ready " + flag(party1.markReady("bob")));
-        System.out.println("party-1: " + party1.readyCount() + "/" + party1.size() + " ready ["
-                + String.join(" ", party1.readyMembers()) + "] waiting [" + String.join(" ", party1.waitingMembers())
-                + "] is_ready " + flag(party1.isReady()));
+        System.out.println(showStatus(party1));
         System.out.println("peek -> " + show(queue.peek()));
         System.out.println("release -> " + show(queue.release()));
 
         System.out.println("mark_group_ready party-2 -> " + flag(queue.markGroupReady("party-2")));
         System.out.println("release_all -> " + showAll(queue.releaseAll()));
+        System.out.println("get party-2 -> " + showFound(queue.get("party-2")));
         System.out.println("len " + queue.size());
     }
 
     // Without strict order, ready party-4 leaves ahead of waiting party-3.
+    // Taking back a member's readiness makes party-3 wait for it again.
     private static void relaxedOrderDemo() {
         System.out.println("-- relaxed order --");
         TitoQueue queue = new TitoQueue(false);
         System.out.println("strict_order " + flag(queue.strictOrder()));
-        System.out.println("admit " + queue.admit("party-3", List.of("dee", "eli")));
+        Group party3 = queue.admit("party-3", List.of("dee", "eli"));
+        System.out.println("admit " + party3);
         System.out.println("admit " + queue.admit("party-4", List.of("fay")));
 
         System.out.println("mark_group_ready party-4 -> " + flag(queue.markGroupReady("party-4")));
@@ -326,6 +352,14 @@ public final class TitoExample {
         System.out.println("mark_ready dee -> group ready " + flag(queue.markReady("dee")));
         System.out.println("release -> " + show(queue.release()));
         System.out.println("mark_ready eli -> group ready " + flag(queue.markReady("eli")));
+        queue.markWaiting("dee");
+        System.out.println("mark_waiting dee");
+        System.out.println(showStatus(party3));
+        System.out.println("release -> " + show(queue.release()));
+        party3.markWaiting("eli");
+        System.out.println("party-3.mark_waiting eli");
+        System.out.println(showStatus(party3));
+        System.out.println("mark_group_ready party-3 -> " + flag(queue.markGroupReady("party-3")));
         System.out.println("release_all -> " + showAll(queue.releaseAll()));
         System.out.println("len " + queue.size());
     }
@@ -357,7 +391,9 @@ public final class TitoExample {
         attempt("admit party-9 [jay jay]", () -> queue.admit("party-9", List.of("jay", "jay")));
         attempt("admit party-9 [kim]", () -> queue.admit("party-9", List.of("kim")));
         attempt("mark_ready zoe", () -> queue.markReady("zoe"));
+        attempt("mark_waiting zoe", () -> queue.markWaiting("zoe"));
         attempt("party-8.mark_ready zoe", () -> queue.groupOf("kim").markReady("zoe"));
+        attempt("party-8.mark_waiting zoe", () -> queue.groupOf("kim").markWaiting("zoe"));
         attempt("mark_group_ready party-9", () -> queue.markGroupReady("party-9"));
         attempt("cancel party-9", () -> queue.cancel("party-9"));
     }
@@ -370,6 +406,18 @@ public final class TitoExample {
     // Format an optional group, as returned by peek() and release().
     private static String show(Group group) {
         return group == null ? "waiting" : group.toString();
+    }
+
+    // Format the optional group returned by get().
+    private static String showFound(Group group) {
+        return group == null ? "none" : group.toString();
+    }
+
+    // Format a group's readiness the same way in every status line.
+    private static String showStatus(Group group) {
+        return group.groupId() + ": " + group.readyCount() + "/" + group.size() + " ready ["
+                + String.join(" ", group.readyMembers()) + "] waiting [" + String.join(" ", group.waitingMembers())
+                + "] is_ready " + flag(group.isReady());
     }
 
     // Format the group lists returned by releaseAll() and clear().

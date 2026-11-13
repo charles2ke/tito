@@ -20,6 +20,7 @@ class PracticalUsageTests(unittest.TestCase):
     def test_restaurant_seats_parties_whole_and_in_arrival_order(self):
         output = run(practical_usage.restaurant_seating)
         self.assertIn("ready to seat: None", output)
+        self.assertIn("raj stepped out, still waiting on: ['raj']", output)
         self.assertLess(output.index("seat mehta-party"), output.index("seat okafor-party"))
         self.assertIn("seat mehta-party: asha raj priya", output)
 
