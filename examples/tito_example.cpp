@@ -63,6 +63,18 @@ public:
         return is_ready();
     }
 
+    // Take back a member's readiness, so the group waits for it again.
+    void mark_waiting(const std::string& member) {
+        auto it = ready_.find(member);
+        if (it == ready_.end()) {
+            throw TitoError(member + " is not a member of group " + group_id_);
+        }
+        if (it->second) {
+            it->second = false;
+            --ready_count_;
+        }
+    }
+
     std::size_t size() const { return members_.size(); }
     bool contains(const std::string& member) const { return ready_.count(member) != 0; }
 
@@ -142,6 +154,15 @@ public:
         return group->mark_ready(member);
     }
 
+    // Take back a queued member's readiness; its group waits for it again.
+    void mark_waiting(const std::string& member) {
+        Group* group = group_of(member);
+        if (group == nullptr) {
+            throw TitoError(member + " is not in the queue");
+        }
+        group->mark_waiting(member);
+    }
+
     // Mark every member of a queued group ready.
     bool mark_group_ready(const std::string& group_id) {
         Group* group = find(group_id);
@@ -153,6 +174,9 @@ public:
         }
         return true;
     }
+
+    // The waiting group with this id, or nullptr if it is not in the queue.
+    Group* get(const std::string& group_id) { return find(group_id); }
 
     // The group a queued member belongs to, or nullptr if not queued.
     Group* group_of(const std::string& member) {
@@ -281,6 +305,9 @@ std::string join(const std::vector<std::string>& parts) {
 // Format an optional group, as returned by peek() and release().
 std::string show(const Group* group) { return group == nullptr ? "waiting" : group->str(); }
 
+// Format the optional group returned by get().
+std::string show_found(const Group* group) { return group == nullptr ? "none" : group->str(); }
+
 // Format the group lists returned by release_all() and clear().
 std::string show_all(const std::vector<std::unique_ptr<Group>>& groups) {
     if (groups.empty()) {
@@ -326,6 +353,7 @@ void strict_order_demo() {
     std::cout << "len " << queue.size() << ", groups " << show_ids(queue.groups()) << "\n";
     std::cout << "contains ann " << flag(queue.contains("ann")) << ", contains zoe "
               << flag(queue.contains("zoe")) << "\n";
+    std::cout << "get party-2 -> " << show_found(queue.get("party-2")) << "\n";
 
     Group* party1 = queue.group_of("bob");
     std::cout << "group_of bob -> " << party1->group_id() << "\n";
@@ -345,15 +373,19 @@ void strict_order_demo() {
 
     std::cout << "mark_group_ready party-2 -> " << flag(queue.mark_group_ready("party-2")) << "\n";
     std::cout << "release_all -> " << show_all(queue.release_all()) << "\n";
+    std::cout << "get party-2 -> " << show_found(queue.get("party-2")) << "\n";
     std::cout << "len " << queue.size() << "\n";
 }
 
 // Without strict order, ready party-4 leaves ahead of waiting party-3.
+//
+// Taking back a member's readiness makes party-3 wait for it again.
 void relaxed_order_demo() {
     std::cout << "-- relaxed order --\n";
     TitoQueue queue(false);
     std::cout << "strict_order " << flag(queue.strict_order()) << "\n";
-    std::cout << "admit " << queue.admit("party-3", {"dee", "eli"}).str() << "\n";
+    Group& party3 = queue.admit("party-3", {"dee", "eli"});
+    std::cout << "admit " << party3.str() << "\n";
     std::cout << "admit " << queue.admit("party-4", {"fay"}).str() << "\n";
 
     std::cout << "mark_group_ready party-4 -> " << flag(queue.mark_group_ready("party-4")) << "\n";
@@ -363,6 +395,14 @@ void relaxed_order_demo() {
     std::cout << "mark_ready dee -> group ready " << flag(queue.mark_ready("dee")) << "\n";
     std::cout << "release -> " << show(queue.release().get()) << "\n";
     std::cout << "mark_ready eli -> group ready " << flag(queue.mark_ready("eli")) << "\n";
+    queue.mark_waiting("dee");
+    std::cout << "mark_waiting dee\n";
+    print_state(party3);
+    std::cout << "release -> " << show(queue.release().get()) << "\n";
+    party3.mark_waiting("eli");
+    std::cout << "party-3.mark_waiting eli\n";
+    print_state(party3);
+    std::cout << "mark_group_ready party-3 -> " << flag(queue.mark_group_ready("party-3")) << "\n";
     std::cout << "release_all -> " << show_all(queue.release_all()) << "\n";
     std::cout << "len " << queue.size() << "\n";
 }
@@ -406,7 +446,9 @@ void error_demo() {
     attempt("admit party-9 [jay jay]", [&] { queue.admit("party-9", {"jay", "jay"}); });
     attempt("admit party-9 [kim]", [&] { queue.admit("party-9", {"kim"}); });
     attempt("mark_ready zoe", [&] { queue.mark_ready("zoe"); });
+    attempt("mark_waiting zoe", [&] { queue.mark_waiting("zoe"); });
     attempt("party-8.mark_ready zoe", [&] { queue.group_of("kim")->mark_ready("zoe"); });
+    attempt("party-8.mark_waiting zoe", [&] { queue.group_of("kim")->mark_waiting("zoe"); });
     attempt("mark_group_ready party-9", [&] { queue.mark_group_ready("party-9"); });
     attempt("cancel party-9", [&] { queue.cancel("party-9"); });
 }

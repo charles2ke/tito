@@ -111,10 +111,10 @@ package to five small, realistic problems — run it with
 
 | Scenario | What it shows |
 | -------- | ------------- |
-| 🍽️ **Restaurant waitlist** | Strict order: a party is seated only once every guest has arrived, and is never overtaken by a party that arrived later. |
+| 🍽️ **Restaurant waitlist** | Strict order: a party is seated only once every guest has arrived, and is never overtaken by a party that arrived later. A guest who steps out is marked waiting again, so the party keeps its place but is not seated without them. |
 | 🎮 **Matchmaking lobbies** | Relaxed order: a complete squad starts its match without waiting for an older, half-full lobby. |
 | 📦 **Batch publishing** | All-or-nothing: dataset shards publish together, and a failed batch is withdrawn whole with `cancel`, so nothing partial is ever published. |
-| 🧵 **Parallel fan-out** | Thread safety: workers mark their own part of a request ready; the response is assembled once all parts have landed, with no extra locking. |
+| 🧵 **Parallel fan-out** | Thread safety: workers mark their own part of a request ready, and the handler sleeps in `release(block=True)` until all parts have landed, with no polling or extra locking. |
 | 🛡️ **Guarded admission** | Double-booking a member is refused rather than silently corrupting the group that already holds it. |
 
 ## 🔀 Ordering policies
@@ -130,15 +130,17 @@ package to five small, realistic problems — run it with
 | ---- | ------- |
 | `admit(group_id, members)` | Admit a group; members enter together. |
 | `mark_ready(member)` / `mark_group_ready(group_id)` | Signal readiness. |
+| `mark_waiting(member)` | Take a member's readiness back; its group keeps its place, but cannot depart until the member is ready again. |
 | `peek()` / `release()` / `release_all()` | Inspect or release departing groups. |
+| `release(block=True, timeout=None)` / `release_all(block=True, timeout=None)` | Sleep until a group can depart instead of polling; give up after `timeout` seconds and return `None` / `[]`. |
 | `cancel(group_id)` / `clear()` | Withdraw waiting groups without releasing them; a cancelled group still leaves as a whole. |
-| `group_of(member)`, `groups`, `len(queue)`, `member in queue` | Inspection. |
+| `get(group_id)`, `group_of(member)`, `groups`, `len(queue)`, `member in queue` | Inspection; `get` and `group_of` return `None` for groups that are not waiting. |
 
 Invalid operations (empty groups, duplicate group ids or members, unknown
-members, unhashable group ids or members) raise
-[`TitoError`](#-errors--debugging).
+members, unhashable group ids or members, a `timeout` that is negative or
+given without `block=True`) raise [`TitoError`](#-errors--debugging).
 
-A `Group` returned by `admit()`, `release()` or `cancel()` is a plain object you can keep and inspect:
+A `Group` returned by `admit()`, `get()`, `release()` or `cancel()` is a plain object you can keep and inspect:
 
 | Call | Purpose |
 | ---- | ------- |
@@ -146,6 +148,7 @@ A `Group` returned by `admit()`, `release()` or `cancel()` is a plain object you
 | `is_ready`, `ready_count` | Whether the whole group may depart, and how far along it is. |
 | `sequence` | Arrival order assigned at admission. |
 | `mark_ready(member)` | Mark one member ready; returns whether the group is now ready. |
+| `mark_waiting(member)` | Take one member's readiness back. |
 | `len(group)`, `iter(group)`, `member in group` | Inspection. |
 
 ## ⚡ Complexity
@@ -156,7 +159,9 @@ For a group of `k` members, with `n` groups waiting and `m` total queued members
 | --------- | ------------ | ------------- |
 | `admit()` | O(k) | O(k) |
 | `mark_ready()` | O(1) | O(1) |
+| `mark_waiting()` | O(1) | O(1) amortised |
 | `mark_group_ready()` | O(k) | O(k) |
+| `get()` | O(1) | O(1) |
 | `peek()` | O(1) | O(log n) amortised |
 | `release()` | O(k) | O(k + log n) amortised |
 | `cancel()` | O(k) amortised | O(k) amortised |
@@ -167,9 +172,10 @@ For a group of `k` members, with `n` groups waiting and `m` total queued members
 <summary>How the queue stays this cheap</summary>
 
 A strict-order queue always releases the head of the line, so it keeps no
-ready index at all — becoming ready costs nothing in time or memory. A
-non-strict queue keeps ready groups in an arrival-ordered heap, so a
-long-blocked group at the head is never rescanned, and stale entries are
+ready index at all — becoming ready costs no memory, and only a constant-time
+check for blocked consumers. A non-strict queue keeps ready groups in an
+arrival-ordered heap, so a long-blocked group at the head is never rescanned,
+and the stale entries left by groups that departed or stopped being ready are
 compacted away so the heap cannot grow without bound.
 
 Each group stores its members once in admission order plus one hash table
@@ -194,8 +200,28 @@ locking:
   `clear()` or `release_all()`;
 - concurrent `mark_ready()` calls count each member once and notify the queue
   once, even when several threads complete the same group;
+- once `mark_waiting(member)` returns, that member's group cannot depart until
+  the member is marked ready again;
 - concurrent `admit()` calls get distinct, arrival-ordered sequence numbers,
   and duplicate group ids or members are still rejected.
+
+Consumers do not need to poll: `release(block=True)` sleeps until a group can
+depart. Each change that lets a group depart — a group becoming ready, a
+cancelled head of the line, or a consumer releasing the head in front of
+other ready groups — wakes one blocked consumer rather than all of them. A
+`timeout` lets a consumer notice when it is time to stop:
+
+```python
+import threading
+
+stop = threading.Event()
+
+def consume(queue):
+    while not stop.is_set():
+        group = queue.release(block=True, timeout=1.0)  # None after 1 s idle
+        if group is not None:
+            handle(group)  # your code
+```
 
 A queue and the groups it has admitted share one reentrant lock, so marking a
 member ready and the queue bookkeeping it triggers are a single atomic step.
@@ -211,7 +237,8 @@ briefly contend with its former queue.
 The same discipline written from scratch in thirteen popular languages lives in
 [`examples/`](examples/README.md) — C, C++, C#, Go, Java, JavaScript, Kotlin,
 PHP, Python, Ruby, Rust, Swift and TypeScript. Each one implements the whole
-API above, apart from thread safety, and prints the same output.
+API above, apart from thread safety and blocking release, and prints the same
+output.
 
 ## ✅ Requirements & tests
 

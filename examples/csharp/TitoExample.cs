@@ -18,7 +18,7 @@ public sealed class TitoException : Exception
 
 /// <summary>
 /// A set of members that entered the queue together. A group is only ever
-/// released as a whole: it departs once every member has been marked ready.
+/// released as a whole: it departs once every member is marked ready.
 /// </summary>
 public sealed class Group
 {
@@ -87,6 +87,21 @@ public sealed class Group
         return IsReady;
     }
 
+    /// <summary>Take back a member's readiness, so the group waits for it again.</summary>
+    public void MarkWaiting(string member)
+    {
+        if (!_ready.TryGetValue(member, out var ready))
+        {
+            throw new TitoException($"{member} is not a member of group {GroupId}");
+        }
+
+        if (ready)
+        {
+            _ready[member] = false;
+            _readyCount--;
+        }
+    }
+
     public bool Contains(string member) => _ready.ContainsKey(member);
 
     public override string ToString() => $"{GroupId} [{string.Join(" ", _members)}]";
@@ -149,6 +164,18 @@ public sealed class TitoQueue
         return group.MarkReady(member);
     }
 
+    /// <summary>Take back a queued member's readiness; its group waits for it again.</summary>
+    public void MarkWaiting(string member)
+    {
+        var group = GroupOf(member);
+        if (group is null)
+        {
+            throw new TitoException($"{member} is not in the queue");
+        }
+
+        group.MarkWaiting(member);
+    }
+
     /// <summary>Mark every member of a queued group ready.</summary>
     public bool MarkGroupReady(string groupId)
     {
@@ -163,6 +190,12 @@ public sealed class TitoQueue
         }
 
         return true;
+    }
+
+    /// <summary>The waiting group with this id, or null if it is not in the queue.</summary>
+    public Group? Get(string groupId)
+    {
+        return _byId.TryGetValue(groupId, out var group) ? group : null;
     }
 
     /// <summary>The group a queued member belongs to, or null if not queued.</summary>
@@ -283,33 +316,37 @@ public static class Program
         Console.WriteLine($"admit {queue.Admit("party-2", new[] { "cy" })}");
         Console.WriteLine($"len {queue.Count}, groups {ShowIds(queue.Groups)}");
         Console.WriteLine($"contains ann {Flag(queue.Contains("ann"))}, contains zoe {Flag(queue.Contains("zoe"))}");
+        Console.WriteLine($"get party-2 -> {ShowFound(queue.Get("party-2"))}");
 
         var party1 = queue.GroupOf("bob")!;
         Console.WriteLine($"group_of bob -> {party1.GroupId}");
         Console.WriteLine($"party-1: size {party1.Count}, contains ann {Flag(party1.Contains("ann"))}, contains zoe {Flag(party1.Contains("zoe"))}");
 
         Console.WriteLine($"mark_ready ann -> group ready {Flag(queue.MarkReady("ann"))}");
-        Console.WriteLine($"party-1: {party1.ReadyCount}/{party1.Count} ready [{string.Join(" ", party1.ReadyMembers)}] waiting [{string.Join(" ", party1.WaitingMembers)}] is_ready {Flag(party1.IsReady)}");
+        Console.WriteLine(ShowStatus(party1));
         Console.WriteLine($"peek -> {Show(queue.Peek())}");
         Console.WriteLine($"release -> {Show(queue.Release())}");
 
         Console.WriteLine($"party-1.mark_ready bob -> group ready {Flag(party1.MarkReady("bob"))}");
-        Console.WriteLine($"party-1: {party1.ReadyCount}/{party1.Count} ready [{string.Join(" ", party1.ReadyMembers)}] waiting [{string.Join(" ", party1.WaitingMembers)}] is_ready {Flag(party1.IsReady)}");
+        Console.WriteLine(ShowStatus(party1));
         Console.WriteLine($"peek -> {Show(queue.Peek())}");
         Console.WriteLine($"release -> {Show(queue.Release())}");
 
         Console.WriteLine($"mark_group_ready party-2 -> {Flag(queue.MarkGroupReady("party-2"))}");
         Console.WriteLine($"release_all -> {ShowAll(queue.ReleaseAll())}");
+        Console.WriteLine($"get party-2 -> {ShowFound(queue.Get("party-2"))}");
         Console.WriteLine($"len {queue.Count}");
     }
 
     // Without strict order, ready party-4 leaves ahead of waiting party-3.
+    // Taking back a member's readiness makes party-3 wait for it again.
     private static void RelaxedOrderDemo()
     {
         Console.WriteLine("-- relaxed order --");
         var queue = new TitoQueue(strictOrder: false);
         Console.WriteLine($"strict_order {Flag(queue.StrictOrder)}");
-        Console.WriteLine($"admit {queue.Admit("party-3", new[] { "dee", "eli" })}");
+        var party3 = queue.Admit("party-3", new[] { "dee", "eli" });
+        Console.WriteLine($"admit {party3}");
         Console.WriteLine($"admit {queue.Admit("party-4", new[] { "fay" })}");
 
         Console.WriteLine($"mark_group_ready party-4 -> {Flag(queue.MarkGroupReady("party-4"))}");
@@ -319,6 +356,14 @@ public static class Program
         Console.WriteLine($"mark_ready dee -> group ready {Flag(queue.MarkReady("dee"))}");
         Console.WriteLine($"release -> {Show(queue.Release())}");
         Console.WriteLine($"mark_ready eli -> group ready {Flag(queue.MarkReady("eli"))}");
+        queue.MarkWaiting("dee");
+        Console.WriteLine("mark_waiting dee");
+        Console.WriteLine(ShowStatus(party3));
+        Console.WriteLine($"release -> {Show(queue.Release())}");
+        party3.MarkWaiting("eli");
+        Console.WriteLine("party-3.mark_waiting eli");
+        Console.WriteLine(ShowStatus(party3));
+        Console.WriteLine($"mark_group_ready party-3 -> {Flag(queue.MarkGroupReady("party-3"))}");
         Console.WriteLine($"release_all -> {ShowAll(queue.ReleaseAll())}");
         Console.WriteLine($"len {queue.Count}");
     }
@@ -352,7 +397,9 @@ public static class Program
         Attempt("admit party-9 [jay jay]", () => queue.Admit("party-9", new[] { "jay", "jay" }));
         Attempt("admit party-9 [kim]", () => queue.Admit("party-9", new[] { "kim" }));
         Attempt("mark_ready zoe", () => queue.MarkReady("zoe"));
+        Attempt("mark_waiting zoe", () => queue.MarkWaiting("zoe"));
         Attempt("party-8.mark_ready zoe", () => queue.GroupOf("kim")!.MarkReady("zoe"));
+        Attempt("party-8.mark_waiting zoe", () => queue.GroupOf("kim")!.MarkWaiting("zoe"));
         Attempt("mark_group_ready party-9", () => queue.MarkGroupReady("party-9"));
         Attempt("cancel party-9", () => queue.Cancel("party-9"));
     }
@@ -362,6 +409,13 @@ public static class Program
 
     // Format an optional group, as returned by Peek() and Release().
     private static string Show(Group? group) => group is null ? "waiting" : group.ToString();
+
+    // Format the optional group returned by Get().
+    private static string ShowFound(Group? group) => group is null ? "none" : group.ToString();
+
+    // Format a group's readiness the same way in every status line.
+    private static string ShowStatus(Group group) =>
+        $"{group.GroupId}: {group.ReadyCount}/{group.Count} ready [{string.Join(" ", group.ReadyMembers)}] waiting [{string.Join(" ", group.WaitingMembers)}] is_ready {Flag(group.IsReady)}";
 
     // Format the group lists returned by ReleaseAll() and Clear().
     private static string ShowAll(IReadOnlyList<Group> groups) =>

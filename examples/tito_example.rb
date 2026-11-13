@@ -8,7 +8,7 @@ class TitoError < StandardError; end
 # A set of members that entered the queue together.
 #
 # A group is only ever released as a whole: it departs when, and only
-# when, all of its members have been marked ready.
+# when, all of its members are marked ready.
 class Group
   attr_reader :group_id, :members, :ready_count
 
@@ -52,6 +52,17 @@ class Group
       @ready_count += 1
     end
     ready?
+  end
+
+  # Take back a member's readiness, so the group waits for it again.
+  def mark_waiting(member)
+    raise TitoError, "#{member} is not a member of group #{@group_id}" unless @ready.key?(member)
+
+    if @ready[member]
+      @ready[member] = false
+      @ready_count -= 1
+    end
+    nil
   end
 
   def size
@@ -103,6 +114,14 @@ class TitoQueue
     group.mark_ready(member)
   end
 
+  # Take back a queued member's readiness; its group waits for it again.
+  def mark_waiting(member)
+    group = group_of(member)
+    raise TitoError, "#{member} is not in the queue" if group.nil?
+
+    group.mark_waiting(member)
+  end
+
   # Mark every member of a queued group ready.
   def mark_group_ready(group_id)
     group = @groups[group_id]
@@ -110,6 +129,11 @@ class TitoQueue
 
     group.members.each { |member| group.mark_ready(member) }
     true
+  end
+
+  # The waiting group with this id, or nil if it is not in the queue.
+  def get(group_id)
+    @groups[group_id]
   end
 
   # The group a queued member belongs to, or nil if not queued.
@@ -199,6 +223,18 @@ def show(group)
   group.nil? ? 'waiting' : group.to_s
 end
 
+# Format the optional group returned by get.
+def show_found(group)
+  group.nil? ? 'none' : group.to_s
+end
+
+# Format a group's readiness the same way in every status line.
+def show_status(group)
+  "#{group.group_id}: #{group.ready_count}/#{group.size} " \
+    "ready [#{group.ready_members.join(' ')}] " \
+    "waiting [#{group.waiting_members.join(' ')}] is_ready #{flag(group.ready?)}"
+end
+
 # Format the group lists returned by release_all and clear.
 def show_all(groups)
   return 'none' if groups.empty?
@@ -221,6 +257,7 @@ def strict_order_demo
   puts "admit #{queue.admit('party-2', %w[cy])}"
   puts "len #{queue.size}, groups #{show_ids(queue.groups)}"
   puts "contains ann #{flag(queue.contains?('ann'))}, contains zoe #{flag(queue.contains?('zoe'))}"
+  puts "get party-2 -> #{show_found(queue.get('party-2'))}"
 
   party1 = queue.group_of('bob')
   puts "group_of bob -> #{party1.group_id}"
@@ -228,28 +265,30 @@ def strict_order_demo
        "contains zoe #{flag(party1.contains?('zoe'))}"
 
   puts "mark_ready ann -> group ready #{flag(queue.mark_ready('ann'))}"
-  puts "party-1: #{party1.ready_count}/#{party1.size} ready [#{party1.ready_members.join(' ')}] " \
-       "waiting [#{party1.waiting_members.join(' ')}] is_ready #{flag(party1.ready?)}"
+  puts show_status(party1)
   puts "peek -> #{show(queue.peek)}"
   puts "release -> #{show(queue.release)}"
 
   puts "party-1.mark_ready bob -> group ready #{flag(party1.mark_ready('bob'))}"
-  puts "party-1: #{party1.ready_count}/#{party1.size} ready [#{party1.ready_members.join(' ')}] " \
-       "waiting [#{party1.waiting_members.join(' ')}] is_ready #{flag(party1.ready?)}"
+  puts show_status(party1)
   puts "peek -> #{show(queue.peek)}"
   puts "release -> #{show(queue.release)}"
 
   puts "mark_group_ready party-2 -> #{flag(queue.mark_group_ready('party-2'))}"
   puts "release_all -> #{show_all(queue.release_all)}"
+  puts "get party-2 -> #{show_found(queue.get('party-2'))}"
   puts "len #{queue.size}"
 end
 
 # Without strict order, ready party-4 leaves ahead of waiting party-3.
+#
+# Taking back a member's readiness makes party-3 wait for it again.
 def relaxed_order_demo
   puts '-- relaxed order --'
   queue = TitoQueue.new(strict_order: false)
   puts "strict_order #{flag(queue.strict_order)}"
-  puts "admit #{queue.admit('party-3', %w[dee eli])}"
+  party3 = queue.admit('party-3', %w[dee eli])
+  puts "admit #{party3}"
   puts "admit #{queue.admit('party-4', %w[fay])}"
 
   puts "mark_group_ready party-4 -> #{flag(queue.mark_group_ready('party-4'))}"
@@ -259,6 +298,14 @@ def relaxed_order_demo
   puts "mark_ready dee -> group ready #{flag(queue.mark_ready('dee'))}"
   puts "release -> #{show(queue.release)}"
   puts "mark_ready eli -> group ready #{flag(queue.mark_ready('eli'))}"
+  queue.mark_waiting('dee')
+  puts 'mark_waiting dee'
+  puts show_status(party3)
+  puts "release -> #{show(queue.release)}"
+  party3.mark_waiting('eli')
+  puts 'party-3.mark_waiting eli'
+  puts show_status(party3)
+  puts "mark_group_ready party-3 -> #{flag(queue.mark_group_ready('party-3'))}"
   puts "release_all -> #{show_all(queue.release_all)}"
   puts "len #{queue.size}"
 end
@@ -299,7 +346,9 @@ def error_demo
   attempt('admit party-9 [jay jay]') { queue.admit('party-9', %w[jay jay]) }
   attempt('admit party-9 [kim]') { queue.admit('party-9', %w[kim]) }
   attempt('mark_ready zoe') { queue.mark_ready('zoe') }
+  attempt('mark_waiting zoe') { queue.mark_waiting('zoe') }
   attempt('party-8.mark_ready zoe') { queue.group_of('kim').mark_ready('zoe') }
+  attempt('party-8.mark_waiting zoe') { queue.group_of('kim').mark_waiting('zoe') }
   attempt('mark_group_ready party-9') { queue.mark_group_ready('party-9') }
   attempt('cancel party-9') { queue.cancel('party-9') }
 end

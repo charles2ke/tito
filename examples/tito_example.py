@@ -14,7 +14,7 @@ class Group:
     """A set of members that entered the queue together.
 
     A group is only ever released as a whole: it departs when, and only
-    when, all of its members have been marked ready.
+    when, all of its members are marked ready.
     """
 
     def __init__(self, group_id, members):
@@ -57,6 +57,14 @@ class Group:
             self._ready[member] = True
             self._ready_count += 1
         return self.is_ready
+
+    def mark_waiting(self, member):
+        """Take back a member's readiness, so the group waits for it again."""
+        if member not in self._ready:
+            raise TitoError("%s is not a member of group %s" % (member, self.group_id))
+        if self._ready[member]:
+            self._ready[member] = False
+            self._ready_count -= 1
 
     def __len__(self):
         return len(self.members)
@@ -102,6 +110,13 @@ class TitoQueue:
             raise TitoError("%s is not in the queue" % member)
         return group.mark_ready(member)
 
+    def mark_waiting(self, member):
+        """Take back a queued member's readiness; its group waits for it again."""
+        group = self.group_of(member)
+        if group is None:
+            raise TitoError("%s is not in the queue" % member)
+        group.mark_waiting(member)
+
     def mark_group_ready(self, group_id):
         """Mark every member of a queued group ready."""
         group = self._groups.get(group_id)
@@ -110,6 +125,13 @@ class TitoQueue:
         for member in group.members:
             group.mark_ready(member)
         return True
+
+    def get(self, group_id):
+        """The waiting group with this id, or None if it is not in the queue."""
+        try:
+            return self._groups.get(group_id)
+        except TypeError:
+            return None
 
     def group_of(self, member):
         """The group a queued member belongs to, or None if not queued."""
@@ -190,6 +212,18 @@ def show(group):
     return "waiting" if group is None else str(group)
 
 
+def show_found(group):
+    """Format the optional group returned by get()."""
+    return "none" if group is None else str(group)
+
+
+def show_status(group):
+    """Format a group's readiness the same way in every status line."""
+    return "%s: %d/%d ready [%s] waiting [%s] is_ready %s" % (
+        group.group_id, group.ready_count, len(group), " ".join(group.ready_members),
+        " ".join(group.waiting_members), flag(group.is_ready))
+
+
 def show_all(groups):
     """Format the group lists returned by release_all() and clear()."""
     if not groups:
@@ -212,6 +246,7 @@ def strict_order_demo():
     print("admit %s" % queue.admit("party-2", ["cy"]))
     print("len %d, groups %s" % (len(queue), show_ids(queue.groups)))
     print("contains ann %s, contains zoe %s" % (flag("ann" in queue), flag("zoe" in queue)))
+    print("get party-2 -> %s" % show_found(queue.get("party-2")))
 
     party1 = queue.group_of("bob")
     print("group_of bob -> %s" % party1.group_id)
@@ -219,30 +254,31 @@ def strict_order_demo():
           % (len(party1), flag("ann" in party1), flag("zoe" in party1)))
 
     print("mark_ready ann -> group ready %s" % flag(queue.mark_ready("ann")))
-    print("party-1: %d/%d ready [%s] waiting [%s] is_ready %s"
-          % (party1.ready_count, len(party1), " ".join(party1.ready_members),
-             " ".join(party1.waiting_members), flag(party1.is_ready)))
+    print(show_status(party1))
     print("peek -> %s" % show(queue.peek()))
     print("release -> %s" % show(queue.release()))
 
     print("party-1.mark_ready bob -> group ready %s" % flag(party1.mark_ready("bob")))
-    print("party-1: %d/%d ready [%s] waiting [%s] is_ready %s"
-          % (party1.ready_count, len(party1), " ".join(party1.ready_members),
-             " ".join(party1.waiting_members), flag(party1.is_ready)))
+    print(show_status(party1))
     print("peek -> %s" % show(queue.peek()))
     print("release -> %s" % show(queue.release()))
 
     print("mark_group_ready party-2 -> %s" % flag(queue.mark_group_ready("party-2")))
     print("release_all -> %s" % show_all(queue.release_all()))
+    print("get party-2 -> %s" % show_found(queue.get("party-2")))
     print("len %d" % len(queue))
 
 
 def relaxed_order_demo():
-    """Without strict order, ready party-4 leaves ahead of waiting party-3."""
+    """Without strict order, ready party-4 leaves ahead of waiting party-3.
+
+    Taking back a member's readiness makes party-3 wait for it again.
+    """
     print("-- relaxed order --")
     queue = TitoQueue(strict_order=False)
     print("strict_order %s" % flag(queue.strict_order))
-    print("admit %s" % queue.admit("party-3", ["dee", "eli"]))
+    party3 = queue.admit("party-3", ["dee", "eli"])
+    print("admit %s" % party3)
     print("admit %s" % queue.admit("party-4", ["fay"]))
 
     print("mark_group_ready party-4 -> %s" % flag(queue.mark_group_ready("party-4")))
@@ -252,6 +288,14 @@ def relaxed_order_demo():
     print("mark_ready dee -> group ready %s" % flag(queue.mark_ready("dee")))
     print("release -> %s" % show(queue.release()))
     print("mark_ready eli -> group ready %s" % flag(queue.mark_ready("eli")))
+    queue.mark_waiting("dee")
+    print("mark_waiting dee")
+    print(show_status(party3))
+    print("release -> %s" % show(queue.release()))
+    party3.mark_waiting("eli")
+    print("party-3.mark_waiting eli")
+    print(show_status(party3))
+    print("mark_group_ready party-3 -> %s" % flag(queue.mark_group_ready("party-3")))
     print("release_all -> %s" % show_all(queue.release_all()))
     print("len %d" % len(queue))
 
@@ -293,7 +337,9 @@ def error_demo():
     attempt("admit party-9 [jay jay]", lambda: queue.admit("party-9", ["jay", "jay"]))
     attempt("admit party-9 [kim]", lambda: queue.admit("party-9", ["kim"]))
     attempt("mark_ready zoe", lambda: queue.mark_ready("zoe"))
+    attempt("mark_waiting zoe", lambda: queue.mark_waiting("zoe"))
     attempt("party-8.mark_ready zoe", lambda: queue.group_of("kim").mark_ready("zoe"))
+    attempt("party-8.mark_waiting zoe", lambda: queue.group_of("kim").mark_waiting("zoe"))
     attempt("mark_group_ready party-9", lambda: queue.mark_group_ready("party-9"))
     attempt("cancel party-9", lambda: queue.cancel("party-9"))
 

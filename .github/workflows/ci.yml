@@ -10,7 +10,9 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned: setup-python publishes no Python 3.9 build for Ubuntu 26.04,
+    # which ubuntu-latest now points at.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

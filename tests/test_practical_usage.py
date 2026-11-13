@@ -3,6 +3,7 @@ import os
 import sys
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples"))
 
@@ -20,6 +21,7 @@ class PracticalUsageTests(unittest.TestCase):
     def test_restaurant_seats_parties_whole_and_in_arrival_order(self):
         output = run(practical_usage.restaurant_seating)
         self.assertIn("ready to seat: None", output)
+        self.assertIn("raj stepped out, still waiting on: ['raj']", output)
         self.assertLess(output.index("seat mehta-party"), output.index("seat okafor-party"))
         self.assertIn("seat mehta-party: asha raj priya", output)
 
@@ -40,6 +42,17 @@ class PracticalUsageTests(unittest.TestCase):
             "respond to request-7 with 3 parts: orders-data profile-data recommendations-data",
             output,
         )
+
+    def test_fan_out_timeout_does_not_wait_for_workers(self):
+        with patch.object(practical_usage.threading, "Thread") as thread, patch.object(
+            practical_usage.TitoQueue, "release", return_value=None
+        ):
+            output = run(practical_usage.parallel_fan_out)
+
+        self.assertIn("request-7 timed out", output)
+        self.assertEqual(thread.call_count, 3)
+        self.assertTrue(all(call.kwargs["daemon"] for call in thread.call_args_list))
+        thread.return_value.join.assert_not_called()
 
     def test_guarded_admission_refuses_double_booking(self):
         output = run(practical_usage.guarded_admission)

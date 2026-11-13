@@ -17,8 +17,8 @@ impl fmt::Display for TitoError {
 
 impl std::error::Error for TitoError {}
 
-/// A set of members admitted together. It departs only once every member has
-/// been marked ready.
+/// A set of members admitted together. It departs only once every member is
+/// marked ready.
 struct Group {
     group_id: String,
     members: Vec<String>,
@@ -92,6 +92,23 @@ impl Group {
             }
         }
         Ok(self.is_ready())
+    }
+
+    /// Take back a member's readiness, so the group waits for it again.
+    fn mark_waiting(&mut self, member: &str) -> Result<(), TitoError> {
+        if !self.ready.contains_key(member) {
+            return Err(TitoError(format!(
+                "{} is not a member of group {}",
+                member, self.group_id
+            )));
+        }
+        if let Some(flag) = self.ready.get_mut(member) {
+            if *flag {
+                *flag = false;
+                self.ready_count -= 1;
+            }
+        }
+        Ok(())
     }
 
     fn len(&self) -> usize {
@@ -171,6 +188,14 @@ impl TitoQueue {
         }
     }
 
+    /// Take back a queued member's readiness; its group waits for it again.
+    fn mark_waiting(&mut self, member: &str) -> Result<(), TitoError> {
+        match self.group_of_mut(member) {
+            Some(group) => group.mark_waiting(member),
+            None => Err(TitoError(format!("{} is not in the queue", member))),
+        }
+    }
+
     /// Mark every member of a queued group ready.
     fn mark_group_ready(&mut self, group_id: &str) -> Result<bool, TitoError> {
         let group = match self.groups.iter_mut().find(|g| g.group_id == group_id) {
@@ -187,6 +212,11 @@ impl TitoQueue {
             group.mark_ready(member)?;
         }
         Ok(true)
+    }
+
+    /// The waiting group with this id, or None if it is not in the queue.
+    fn get(&self, group_id: &str) -> Option<&Group> {
+        self.groups.iter().find(|g| g.group_id == group_id)
     }
 
     /// The group a queued member belongs to, or None if not queued.
@@ -290,6 +320,14 @@ fn show(group: Option<&Group>) -> String {
     }
 }
 
+/// Format the optional group returned by get.
+fn show_found(group: Option<&Group>) -> String {
+    match group {
+        Some(group) => group.to_string(),
+        None => "none".to_string(),
+    }
+}
+
 /// Format the group lists returned by release_all and clear.
 fn show_all(groups: &[Group]) -> String {
     if groups.is_empty() {
@@ -314,7 +352,7 @@ fn show_ids(groups: &[Group]) -> String {
         .join(" ")
 }
 
-/// Format a group's readiness the same way in both status lines.
+/// Format a group's readiness the same way in every status line.
 fn status(group: &Group) -> String {
     format!(
         "{}/{} ready [{}] waiting [{}] is_ready {}",
@@ -338,6 +376,7 @@ fn strict_order_demo() -> Result<(), TitoError> {
         flag(queue.contains("ann")),
         flag(queue.contains("zoe"))
     );
+    println!("get party-2 -> {}", show_found(queue.get("party-2")));
 
     {
         let party1 = queue.group_of("bob").expect("party-1 is queued");
@@ -378,11 +417,14 @@ fn strict_order_demo() -> Result<(), TitoError> {
         flag(queue.mark_group_ready("party-2")?)
     );
     println!("release_all -> {}", show_all(&queue.release_all()));
+    println!("get party-2 -> {}", show_found(queue.get("party-2")));
     println!("len {}", queue.len());
     Ok(())
 }
 
 /// Without strict order, ready party-4 leaves ahead of waiting party-3.
+///
+/// Taking back a member's readiness makes party-3 wait for it again.
 fn relaxed_order_demo() -> Result<(), TitoError> {
     println!("-- relaxed order --");
     let mut queue = TitoQueue::new(false);
@@ -405,6 +447,26 @@ fn relaxed_order_demo() -> Result<(), TitoError> {
     println!(
         "mark_ready eli -> group ready {}",
         flag(queue.mark_ready("eli")?)
+    );
+    queue.mark_waiting("dee")?;
+    println!("mark_waiting dee");
+    println!(
+        "party-3: {}",
+        status(queue.get("party-3").expect("party-3 is queued"))
+    );
+    println!("release -> {}", show(queue.release().as_ref()));
+    queue
+        .group_of_mut("eli")
+        .expect("party-3 is queued")
+        .mark_waiting("eli")?;
+    println!("party-3.mark_waiting eli");
+    println!(
+        "party-3: {}",
+        status(queue.get("party-3").expect("party-3 is queued"))
+    );
+    println!(
+        "mark_group_ready party-3 -> {}",
+        flag(queue.mark_group_ready("party-3")?)
     );
     println!("release_all -> {}", show_all(&queue.release_all()));
     println!("len {}", queue.len());
@@ -471,6 +533,7 @@ fn error_demo() {
         queue.admit("party-9", &["kim"]).map(|_| ()),
     );
     attempt("mark_ready zoe", queue.mark_ready("zoe").map(|_| ()));
+    attempt("mark_waiting zoe", queue.mark_waiting("zoe"));
     attempt(
         "party-8.mark_ready zoe",
         queue
@@ -478,6 +541,13 @@ fn error_demo() {
             .expect("kim is queued")
             .mark_ready("zoe")
             .map(|_| ()),
+    );
+    attempt(
+        "party-8.mark_waiting zoe",
+        queue
+            .group_of_mut("kim")
+            .expect("kim is queued")
+            .mark_waiting("zoe"),
     );
     attempt(
         "mark_group_ready party-9",

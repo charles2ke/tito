@@ -24,7 +24,9 @@ def restaurant_seating():
     A restaurant with one large table seats a party only once everyone in it
     has turned up, and a party that arrived first is never overtaken. That is
     exactly strict-order TITO: the head of the line blocks the queue, so no
-    group is skipped just because a later group happens to be complete.
+    group is skipped just because a later group happens to be complete. A
+    guest who steps out again is marked waiting: the party keeps its place in
+    line, but is not seated without them.
     """
     print("-- restaurant seating (strict order) --")
     waitlist = TitoQueue()  # strict_order=True: first come, first seated.
@@ -38,7 +40,12 @@ def restaurant_seating():
     print("ready to seat:", waitlist.peek())
     print("still waiting on:", list(waitlist.group_of("asha").waiting_members))
 
-    waitlist.mark_ready("priya")
+    waitlist.mark_waiting("raj")  # raj steps out to take a call...
+    waitlist.mark_ready("priya")  # ...just as priya arrives
+    mehta = waitlist.get("mehta-party")
+    print("priya arrived, raj stepped out, still waiting on:", list(mehta.waiting_members))
+
+    waitlist.mark_ready("raj")
     for party in waitlist.release_all():
         print("seat %s: %s" % (party.group_id, " ".join(party.members)))
     print("parties left on the waitlist:", len(waitlist))
@@ -104,8 +111,9 @@ def parallel_fan_out():
     """Fan a request out to several services and answer when all replies land.
 
     Each worker marks its own part ready from its own thread; the queue is
-    thread-safe, so no extra locking is needed, and the request is only
-    answered once every part of it has completed.
+    thread-safe, so no extra locking is needed. The handler sleeps in
+    ``release(block=True)`` until every part of the request has completed,
+    with no polling, and a timeout so a hung service cannot stall it forever.
     """
     print("\n-- parallel fan-out (thread-safe) --")
     inflight = TitoQueue()
@@ -118,16 +126,22 @@ def parallel_fan_out():
         results[part] = "%s-data" % part  # stands in for an I/O call
         inflight.mark_ready(part)
 
-    workers = [threading.Thread(target=fetch, args=(part,)) for part in parts]
+    workers = [
+        threading.Thread(target=fetch, args=(part,), daemon=True)
+        for part in parts
+    ]
     for worker in workers:
         worker.start()
-    for worker in workers:
-        worker.join()
 
-    response = inflight.release()
-    print("respond to %s with %d parts: %s"
-          % (response.group_id, len(response),
-             " ".join(sorted(results[part] for part in response.members))))
+    response = inflight.release(block=True, timeout=5)
+    if response is None:
+        print("request-7 timed out")
+    else:
+        print("respond to %s with %d parts: %s"
+              % (response.group_id, len(response),
+                 " ".join(sorted(results[part] for part in response.members))))
+        for worker in workers:
+            worker.join()
 
 
 def guarded_admission():

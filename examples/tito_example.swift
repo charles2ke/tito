@@ -34,7 +34,7 @@ enum TitoError: Error, CustomStringConvertible {
 
 /// A set of members admitted together. A reference type, so the group a caller
 /// holds stays in step with the copy the queue tracks. It departs only once
-/// every member has been marked ready.
+/// every member is marked ready.
 final class Group: CustomStringConvertible {
     let groupID: String
     let members: [String]
@@ -82,6 +82,17 @@ final class Group: CustomStringConvertible {
             readyCount += 1
         }
         return isReady
+    }
+
+    /// Take back a member's readiness, so the group waits for it again.
+    func markWaiting(_ member: String) throws {
+        guard let ready = readyFlags[member] else {
+            throw TitoError.notAMember(member: member, group: groupID)
+        }
+        if ready {
+            readyFlags[member] = false
+            readyCount -= 1
+        }
     }
 
     var count: Int {
@@ -141,6 +152,14 @@ final class TitoQueue {
         return try group.markReady(member)
     }
 
+    /// Take back a queued member's readiness; its group waits for it again.
+    func markWaiting(_ member: String) throws {
+        guard let group = groupOf(member) else {
+            throw TitoError.memberNotQueued(member)
+        }
+        try group.markWaiting(member)
+    }
+
     /// Mark every member of a queued group ready.
     @discardableResult
     func markGroupReady(_ groupID: String) throws -> Bool {
@@ -151,6 +170,11 @@ final class TitoQueue {
             try group.markReady(member)
         }
         return true
+    }
+
+    /// The waiting group with this id, or nil if it is not in the queue.
+    func get(_ groupID: String) -> Group? {
+        return byID[groupID]
     }
 
     /// The group a queued member belongs to, or nil if not queued.
@@ -249,6 +273,14 @@ func show(_ group: Group?) -> String {
     return group.description
 }
 
+/// Format the optional group returned by get.
+func showFound(_ group: Group?) -> String {
+    guard let group = group else {
+        return "none"
+    }
+    return group.description
+}
+
 /// Format the group lists returned by releaseAll and clear.
 func showAll(_ groups: [Group]) -> String {
     if groups.isEmpty {
@@ -265,7 +297,7 @@ func showIDs(_ groups: [Group]) -> String {
     return groups.map { $0.groupID }.joined(separator: " ")
 }
 
-/// Format a group's readiness the same way in both status lines.
+/// Format a group's readiness the same way in every status line.
 func status(_ group: Group) -> String {
     return "\(group.readyCount)/\(group.count) ready [\(group.readyMembers.joined(separator: " "))]"
         + " waiting [\(group.waitingMembers.joined(separator: " "))] is_ready \(flag(group.isReady))"
@@ -279,6 +311,7 @@ func strictOrderDemo() throws {
     print("admit \(try queue.admit("party-2", ["cy"]))")
     print("len \(queue.count), groups \(showIDs(queue.groups))")
     print("contains ann \(flag(queue.contains("ann"))), contains zoe \(flag(queue.contains("zoe")))")
+    print("get party-2 -> \(showFound(queue.get("party-2")))")
 
     guard let party1 = queue.groupOf("bob") else { return }
     print("group_of bob -> \(party1.groupID)")
@@ -296,15 +329,19 @@ func strictOrderDemo() throws {
 
     print("mark_group_ready party-2 -> \(flag(try queue.markGroupReady("party-2")))")
     print("release_all -> \(showAll(queue.releaseAll()))")
+    print("get party-2 -> \(showFound(queue.get("party-2")))")
     print("len \(queue.count)")
 }
 
 /// Without strict order, ready party-4 leaves ahead of waiting party-3.
+///
+/// Taking back a member's readiness makes party-3 wait for it again.
 func relaxedOrderDemo() throws {
     print("-- relaxed order --")
     let queue = TitoQueue(strictOrder: false)
     print("strict_order \(flag(queue.strictOrder))")
-    print("admit \(try queue.admit("party-3", ["dee", "eli"]))")
+    let party3 = try queue.admit("party-3", ["dee", "eli"])
+    print("admit \(party3)")
     print("admit \(try queue.admit("party-4", ["fay"]))")
 
     print("mark_group_ready party-4 -> \(flag(try queue.markGroupReady("party-4")))")
@@ -314,6 +351,14 @@ func relaxedOrderDemo() throws {
     print("mark_ready dee -> group ready \(flag(try queue.markReady("dee")))")
     print("release -> \(show(queue.release()))")
     print("mark_ready eli -> group ready \(flag(try queue.markReady("eli")))")
+    try queue.markWaiting("dee")
+    print("mark_waiting dee")
+    print("party-3: \(status(party3))")
+    print("release -> \(show(queue.release()))")
+    try party3.markWaiting("eli")
+    print("party-3.mark_waiting eli")
+    print("party-3: \(status(party3))")
+    print("mark_group_ready party-3 -> \(flag(try queue.markGroupReady("party-3")))")
     print("release_all -> \(showAll(queue.releaseAll()))")
     print("len \(queue.count)")
 }
@@ -361,9 +406,14 @@ func errorDemo() {
     attempt("admit party-9 [jay jay]") { _ = try queue.admit("party-9", ["jay", "jay"]) }
     attempt("admit party-9 [kim]") { _ = try queue.admit("party-9", ["kim"]) }
     attempt("mark_ready zoe") { _ = try queue.markReady("zoe") }
+    attempt("mark_waiting zoe") { try queue.markWaiting("zoe") }
     attempt("party-8.mark_ready zoe") {
         guard let group = queue.groupOf("kim") else { return }
         _ = try group.markReady("zoe")
+    }
+    attempt("party-8.mark_waiting zoe") {
+        guard let group = queue.groupOf("kim") else { return }
+        try group.markWaiting("zoe")
     }
     attempt("mark_group_ready party-9") { _ = try queue.markGroupReady("party-9") }
     attempt("cancel party-9") { _ = try queue.cancel("party-9") }

@@ -8,7 +8,7 @@ class TitoException(message: String) : RuntimeException(message)
 
 /**
  * A set of members that entered the queue together. A group is only ever
- * released as a whole: it departs once every member has been marked ready.
+ * released as a whole: it departs once every member is marked ready.
  */
 class Group(val groupId: String, initialMembers: List<String>) {
     /** The members of this group, in the order they were admitted. */
@@ -58,6 +58,15 @@ class Group(val groupId: String, initialMembers: List<String>) {
         return isReady
     }
 
+    /** Take back a member's readiness, so the group waits for it again. */
+    fun markWaiting(member: String) {
+        val wasReady = ready[member] ?: throw TitoException("$member is not a member of group $groupId")
+        if (wasReady) {
+            ready[member] = false
+            readyCount--
+        }
+    }
+
     operator fun contains(member: String): Boolean = ready.containsKey(member)
 
     override fun toString(): String = "$groupId [${members.joinToString(" ")}]"
@@ -96,6 +105,12 @@ class TitoQueue(val strictOrder: Boolean = true) {
         return group.markReady(member)
     }
 
+    /** Take back a queued member's readiness; its group waits for it again. */
+    fun markWaiting(member: String) {
+        val group = groupOf(member) ?: throw TitoException("$member is not in the queue")
+        group.markWaiting(member)
+    }
+
     /** Mark every member of a queued group ready. */
     fun markGroupReady(groupId: String): Boolean {
         val group = groupsById[groupId] ?: throw TitoException("group $groupId is not in the queue")
@@ -104,6 +119,9 @@ class TitoQueue(val strictOrder: Boolean = true) {
         }
         return true
     }
+
+    /** The waiting group with this id, or null if it is not in the queue. */
+    fun get(groupId: String): Group? = groupsById[groupId]
 
     /** The group a queued member belongs to, or null if not queued. */
     fun groupOf(member: String): Group? {
@@ -180,6 +198,14 @@ private fun flag(value: Boolean): String = if (value) "true" else "false"
 // Format an optional group, as returned by peek() and release().
 private fun show(group: Group?): String = group?.toString() ?: "waiting"
 
+// Format the optional group returned by get().
+private fun showFound(group: Group?): String = group?.toString() ?: "none"
+
+// Format a group's readiness the same way in every status line.
+private fun showStatus(group: Group): String =
+    "${group.groupId}: ${group.readyCount}/${group.size} ready [${group.readyMembers.joinToString(" ")}] " +
+        "waiting [${group.waitingMembers.joinToString(" ")}] is_ready ${flag(group.isReady)}"
+
 // Format the group lists returned by releaseAll() and clear().
 private fun showAll(groups: List<Group>): String =
     if (groups.isEmpty()) "none" else groups.joinToString(", ")
@@ -206,32 +232,36 @@ private fun strictOrderDemo() {
     println("admit ${queue.admit("party-2", listOf("cy"))}")
     println("len ${queue.size}, groups ${showIds(queue.groups)}")
     println("contains ann ${flag("ann" in queue)}, contains zoe ${flag("zoe" in queue)}")
+    println("get party-2 -> ${showFound(queue.get("party-2"))}")
 
     val party1 = queue.groupOf("bob")!!
     println("group_of bob -> ${party1.groupId}")
     println("party-1: size ${party1.size}, contains ann ${flag("ann" in party1)}, contains zoe ${flag("zoe" in party1)}")
 
     println("mark_ready ann -> group ready ${flag(queue.markReady("ann"))}")
-    println("party-1: ${party1.readyCount}/${party1.size} ready [${party1.readyMembers.joinToString(" ")}] waiting [${party1.waitingMembers.joinToString(" ")}] is_ready ${flag(party1.isReady)}")
+    println(showStatus(party1))
     println("peek -> ${show(queue.peek())}")
     println("release -> ${show(queue.release())}")
 
     println("party-1.mark_ready bob -> group ready ${flag(party1.markReady("bob"))}")
-    println("party-1: ${party1.readyCount}/${party1.size} ready [${party1.readyMembers.joinToString(" ")}] waiting [${party1.waitingMembers.joinToString(" ")}] is_ready ${flag(party1.isReady)}")
+    println(showStatus(party1))
     println("peek -> ${show(queue.peek())}")
     println("release -> ${show(queue.release())}")
 
     println("mark_group_ready party-2 -> ${flag(queue.markGroupReady("party-2"))}")
     println("release_all -> ${showAll(queue.releaseAll())}")
+    println("get party-2 -> ${showFound(queue.get("party-2"))}")
     println("len ${queue.size}")
 }
 
 // Without strict order, ready party-4 leaves ahead of waiting party-3.
+// Taking back a member's readiness makes party-3 wait for it again.
 private fun relaxedOrderDemo() {
     println("-- relaxed order --")
     val queue = TitoQueue(strictOrder = false)
     println("strict_order ${flag(queue.strictOrder)}")
-    println("admit ${queue.admit("party-3", listOf("dee", "eli"))}")
+    val party3 = queue.admit("party-3", listOf("dee", "eli"))
+    println("admit $party3")
     println("admit ${queue.admit("party-4", listOf("fay"))}")
 
     println("mark_group_ready party-4 -> ${flag(queue.markGroupReady("party-4"))}")
@@ -241,6 +271,14 @@ private fun relaxedOrderDemo() {
     println("mark_ready dee -> group ready ${flag(queue.markReady("dee"))}")
     println("release -> ${show(queue.release())}")
     println("mark_ready eli -> group ready ${flag(queue.markReady("eli"))}")
+    queue.markWaiting("dee")
+    println("mark_waiting dee")
+    println(showStatus(party3))
+    println("release -> ${show(queue.release())}")
+    party3.markWaiting("eli")
+    println("party-3.mark_waiting eli")
+    println(showStatus(party3))
+    println("mark_group_ready party-3 -> ${flag(queue.markGroupReady("party-3"))}")
     println("release_all -> ${showAll(queue.releaseAll())}")
     println("len ${queue.size}")
 }
@@ -272,7 +310,9 @@ private fun errorDemo() {
     attempt("admit party-9 [jay jay]") { queue.admit("party-9", listOf("jay", "jay")) }
     attempt("admit party-9 [kim]") { queue.admit("party-9", listOf("kim")) }
     attempt("mark_ready zoe") { queue.markReady("zoe") }
+    attempt("mark_waiting zoe") { queue.markWaiting("zoe") }
     attempt("party-8.mark_ready zoe") { queue.groupOf("kim")!!.markReady("zoe") }
+    attempt("party-8.mark_waiting zoe") { queue.groupOf("kim")!!.markWaiting("zoe") }
     attempt("mark_group_ready party-9") { queue.markGroupReady("party-9") }
     attempt("cancel party-9") { queue.cancel("party-9") }
 }

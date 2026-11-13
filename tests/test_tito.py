@@ -36,6 +36,25 @@ class GroupTests(unittest.TestCase):
         self.assertFalse(group.mark_ready("a"))
         self.assertTrue(group.mark_ready("b"))
 
+    def test_mark_waiting_takes_back_readiness(self):
+        group = Group("g", ["a", "b"], 0)
+        group.mark_ready("a")
+        group.mark_ready("b")
+        group.mark_waiting("a")
+        self.assertFalse(group.is_ready)
+        self.assertEqual(group.ready_count, 1)
+        self.assertEqual(group.waiting_members, ("a",))
+        group.mark_waiting("a")
+        self.assertEqual(group.ready_count, 1)
+        self.assertTrue(group.mark_ready("a"))
+
+    def test_mark_waiting_unknown_member(self):
+        group = Group("g", ["a"], 0)
+        with self.assertRaises(TitoError):
+            group.mark_waiting("z")
+        with self.assertRaises(TitoError):
+            group.mark_waiting(["unhashable"])
+
     def test_len_iter_contains(self):
         group = Group("g", ["a", "b"], 0)
         self.assertEqual(len(group), 2)
@@ -116,6 +135,16 @@ class TitoQueueTests(unittest.TestCase):
         queue.mark_group_ready("g1")
         self.assertIs(queue.peek(), group)
         self.assertEqual(len(queue), 1)
+
+    def test_get_finds_waiting_groups_by_id(self):
+        queue = TitoQueue()
+        group = queue.admit("g1", ["a"])
+        self.assertIs(queue.get("g1"), group)
+        self.assertIsNone(queue.get("missing"))
+        self.assertIsNone(queue.get(["unhashable"]))
+        queue.mark_group_ready("g1")
+        queue.release()
+        self.assertIsNone(queue.get("g1"))
 
     def test_none_group_id_can_be_marked_ready(self):
         queue = TitoQueue()
@@ -199,6 +228,58 @@ class ReadyTrackingTests(unittest.TestCase):
         self.assertEqual(released, [0, 1, 2, 3, 4])
         self.assertEqual(len(queue), 1)
         self.assertIsNone(queue.release())
+
+
+class MarkWaitingTests(unittest.TestCase):
+    """A member's readiness can be taken back until its group departs."""
+
+    def test_group_cannot_depart_until_member_is_ready_again(self):
+        for strict in (True, False):
+            with self.subTest(strict_order=strict):
+                queue = TitoQueue(strict_order=strict)
+                group = queue.admit("g1", ["a", "b"])
+                queue.mark_group_ready("g1")
+                queue.mark_waiting("a")
+                self.assertFalse(group.is_ready)
+                self.assertIsNone(queue.peek())
+                self.assertIsNone(queue.release())
+                self.assertTrue(queue.mark_ready("a"))
+                self.assertIs(queue.release(), group)
+
+    def test_strict_head_blocks_again_once_a_member_steps_out(self):
+        queue = TitoQueue(strict_order=True)
+        queue.admit("g1", ["a"])
+        queue.admit("g2", ["b"])
+        queue.mark_group_ready("g1")
+        queue.mark_group_ready("g2")
+        queue.mark_waiting("a")
+        self.assertIsNone(queue.release())
+
+    def test_group_ready_again_departs_in_arrival_order(self):
+        queue = TitoQueue(strict_order=False)
+        queue.admit("g1", ["a"])
+        queue.admit("g2", ["b"])
+        queue.mark_ready("a")
+        queue.mark_waiting("a")
+        queue.mark_ready("b")
+        queue.mark_ready("a")
+        self.assertEqual([g.group_id for g in queue.release_all()], ["g1", "g2"])
+
+    def test_mark_waiting_on_group_object_is_seen_by_queue(self):
+        queue = TitoQueue(strict_order=False)
+        group = queue.admit("g1", ["a"])
+        queue.mark_ready("a")
+        group.mark_waiting("a")
+        self.assertIsNone(queue.release())
+        self.assertEqual(len(queue._ready_groups), 0)
+
+    def test_mark_waiting_refuses_members_not_in_the_queue(self):
+        queue = TitoQueue()
+        with self.assertRaises(TitoError) as caught:
+            queue.mark_waiting("nobody")
+        self.assertIn("departed", str(caught.exception))
+        with self.assertRaises(TitoError):
+            queue.mark_waiting(["unhashable"])
 
 
 class DiagnosticsTests(unittest.TestCase):
@@ -482,6 +563,137 @@ class ThreadSafetyTests(unittest.TestCase):
         self.assertEqual(len(queue._ready_groups), 0)
 
 
+class BlockingReleaseTests(unittest.TestCase):
+    """Consumers can sleep until a group can depart instead of polling."""
+
+    def _start(self, call):
+        """Run ``call(block=True)`` on a daemon thread; returns (thread, results).
+
+        There is no timeout, so a consumer that is never woken hangs, and
+        ``_finish`` reports it, instead of quietly picking the group up late.
+        """
+        results = []
+        thread = threading.Thread(
+            target=lambda: results.append(call(block=True)), daemon=True
+        )
+        thread.start()
+        return thread, results
+
+    def _finish(self, *threads):
+        for thread in threads:
+            thread.join(5)
+            self.assertFalse(thread.is_alive(), "a blocked consumer was never woken")
+
+    def _until_blocked(self, queue, count=1):
+        deadline = time.monotonic() + 5
+        while queue._blocked < count:
+            self.assertLess(time.monotonic(), deadline, "consumer never blocked")
+            time.sleep(0.001)
+
+    def test_blocked_release_wakes_when_group_becomes_ready(self):
+        for strict in (True, False):
+            with self.subTest(strict_order=strict):
+                queue = TitoQueue(strict_order=strict)
+                group = queue.admit("g1", ["a", "b"])
+                thread, results = self._start(queue.release)
+                self._until_blocked(queue)
+                queue.mark_ready("a")
+                group.mark_ready("b")
+                self._finish(thread)
+                self.assertEqual(results, [group])
+
+    def test_blocked_release_times_out_with_none(self):
+        queue = TitoQueue()
+        queue.admit("g1", ["a"])
+        start = time.monotonic()
+        self.assertIsNone(queue.release(block=True, timeout=0.05))
+        self.assertGreaterEqual(time.monotonic() - start, 0.05)
+        self.assertEqual(queue.release_all(block=True, timeout=0), [])
+        self.assertEqual(len(queue), 1)
+
+    def test_strict_blocked_release_waits_for_the_head(self):
+        queue = TitoQueue(strict_order=True)
+        queue.admit("g1", ["a"])
+        queue.admit("g2", ["b"])
+        queue.mark_ready("b")
+        self.assertIsNone(queue.release(block=True, timeout=0.05))
+        thread, results = self._start(queue.release)
+        self._until_blocked(queue)
+        queue.cancel("g1")
+        self._finish(thread)
+        self.assertEqual([g.group_id for g in results], ["g2"])
+
+    def test_blocked_release_all_waits_then_drains_every_departing_group(self):
+        queue = TitoQueue(strict_order=True)
+        queue.admit("g1", ["a"])
+        queue.admit("g2", ["b"])
+        queue.mark_ready("b")
+        thread, results = self._start(queue.release_all)
+        self._until_blocked(queue)
+        queue.mark_ready("a")
+        self._finish(thread)
+        self.assertEqual([[g.group_id for g in r] for r in results], [["g1", "g2"]])
+
+    def test_departing_head_wakes_a_consumer_for_each_ready_group_behind_it(self):
+        queue = TitoQueue(strict_order=True)
+        queue.admit("head", ["h"])
+        for i in range(3):
+            queue.admit(f"g{i}", [f"m{i}"])
+            queue.mark_ready(f"m{i}")
+        consumers = [self._start(queue.release) for _ in range(4)]
+        self._until_blocked(queue, 4)
+        queue.mark_ready("h")
+        self._finish(*(thread for thread, _ in consumers))
+        released = [group.group_id for _, results in consumers for group in results]
+        self.assertEqual(sorted(released), ["g0", "g1", "g2", "head"])
+
+    def test_blocked_consumers_receive_every_group_exactly_once(self):
+        total, consumers = 300, 4
+        for strict in (True, False):
+            with self.subTest(strict_order=strict):
+                queue = TitoQueue(strict_order=strict)
+                stops = [("stop", n) for n in range(consumers)]
+                seen = []
+                lock = threading.Lock()
+
+                def consume():
+                    while True:
+                        group = queue.release(block=True)
+                        if group.group_id in stops:
+                            return
+                        with lock:
+                            seen.append(group.group_id)
+
+                threads = [
+                    threading.Thread(target=consume, daemon=True)
+                    for _ in range(consumers)
+                ]
+                for thread in threads:
+                    thread.start()
+                ids = list(range(total)) + stops
+                # Readying each batch back to front leaves a run of ready
+                # groups queued behind a head that is still waiting.
+                for start in range(0, len(ids), 10):
+                    batch = ids[start:start + 10]
+                    for group_id in batch:
+                        queue.admit(group_id, [group_id])
+                    for group_id in reversed(batch):
+                        queue.mark_ready(group_id)
+                self._finish(*threads)
+                self.assertEqual(sorted(seen), list(range(total)))
+                self.assertEqual(len(queue), 0)
+
+    def test_invalid_timeouts_are_refused(self):
+        queue = TitoQueue()
+        for call in (queue.release, queue.release_all):
+            with self.assertRaises(TitoError) as caught:
+                call(timeout=1)
+            self.assertIn("block=True", str(caught.exception))
+            for timeout in (-1, float("nan"), "5"):
+                with self.assertRaises(TitoError):
+                    call(block=True, timeout=timeout)
+
+
 class CancellationTests(unittest.TestCase):
     """Cancelling withdraws a whole group without releasing it."""
 
@@ -604,6 +816,16 @@ class MemoryTests(unittest.TestCase):
         self._churn(queue, 5000)
         self.assertEqual(len(queue), 1)
         self.assertLess(len(queue._ready_heap), 100)
+
+    def test_ready_waiting_churn_does_not_grow_ready_heap(self):
+        queue = TitoQueue(strict_order=False)
+        queue.admit("g1", ["a", "b"])
+        queue.mark_ready("a")
+        for _ in range(5000):
+            queue.mark_ready("b")
+            queue.mark_waiting("b")
+        self.assertLess(len(queue._ready_heap), 100)
+        self.assertEqual(len(queue._ready_groups), 0)
 
     def test_queue_is_not_kept_alive_by_its_groups(self):
         gc.disable()

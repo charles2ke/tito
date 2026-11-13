@@ -13,7 +13,7 @@
 #define MAX_MSG 128
 
 /* A set of members that entered the queue together. A group is only ever
- * released as a whole: it departs once every member has been marked ready. */
+ * released as a whole: it departs once every member is marked ready. */
 typedef struct {
     char id[MAX_NAME];
     char members[MAX_MEMBERS][MAX_NAME];
@@ -94,6 +94,22 @@ static int group_mark_ready(Group *group, const char *member, char *err, size_t 
                 group->ready_count++;
             }
             return group_is_ready(group);
+        }
+    }
+    snprintf(err, err_size, "%s is not a member of group %s", member, group->id);
+    return -1;
+}
+
+/* Marks member waiting again, taking back its readiness. Returns 0 on success,
+ * -1 if member does not belong to the group (reason written to err). */
+static int group_mark_waiting(Group *group, const char *member, char *err, size_t err_size) {
+    for (int i = 0; i < group->member_count; i++) {
+        if (strcmp(group->members[i], member) == 0) {
+            if (group->ready[i]) {
+                group->ready[i] = 0;
+                group->ready_count--;
+            }
+            return 0;
         }
     }
     snprintf(err, err_size, "%s is not a member of group %s", member, group->id);
@@ -199,6 +215,18 @@ static int tito_mark_ready(TitoQueue *queue, const char *member) {
     return group_mark_ready(group, member, queue->error, sizeof queue->error);
 }
 
+/* Mark a queued member waiting again, taking back its readiness. Returns 0 on
+ * success, -1 if the member is not queued (reason written to queue->error). */
+static int tito_mark_waiting(TitoQueue *queue, const char *member) {
+    Group *group = tito_group_of(queue, member);
+
+    if (group == NULL) {
+        snprintf(queue->error, sizeof queue->error, "%s is not in the queue", member);
+        return -1;
+    }
+    return group_mark_waiting(group, member, queue->error, sizeof queue->error);
+}
+
 /* Mark every member of a queued group ready. Returns 0 on success, -1 if the
  * group is not queued (reason written to queue->error). */
 static int tito_mark_group_ready(TitoQueue *queue, const char *id) {
@@ -215,6 +243,16 @@ static int tito_mark_group_ready(TitoQueue *queue, const char *id) {
     }
     snprintf(queue->error, sizeof queue->error, "group %s is not in the queue", id);
     return -1;
+}
+
+/* The waiting group with this id, or NULL if it is not in the queue. */
+static Group *tito_get(TitoQueue *queue, const char *id) {
+    for (int g = 0; g < queue->group_count; g++) {
+        if (strcmp(queue->groups[g].id, id) == 0) {
+            return &queue->groups[g];
+        }
+    }
+    return NULL;
 }
 
 /* Index of the next group that would be released, or -1 if none can depart. */
@@ -347,6 +385,15 @@ static void format_optional(const Group *group, char *buf, size_t cap) {
     }
 }
 
+/* Format the optional group returned by get(). */
+static void format_found(const Group *group, char *buf, size_t cap) {
+    if (group == NULL) {
+        copy_name(buf, "none");
+    } else {
+        format_group(group, buf, cap);
+    }
+}
+
 /* Format a list of groups as "g1, g2, ...", or "none" when empty. */
 static void format_group_list(const Group *groups, int count, char *buf, size_t cap) {
     size_t len = 0;
@@ -428,6 +475,8 @@ static void strict_order_demo(void) {
     printf("len %d, groups %s\n", tito_len(&queue), buf);
     printf("contains ann %s, contains zoe %s\n", flag(tito_contains(&queue, "ann")),
            flag(tito_contains(&queue, "zoe")));
+    format_found(tito_get(&queue, "party-2"), buf, sizeof buf);
+    printf("get party-2 -> %s\n", buf);
 
     party1 = tito_group_of(&queue, "bob");
     printf("group_of bob -> %s\n", party1->id);
@@ -454,14 +503,19 @@ static void strict_order_demo(void) {
     count = tito_release_all(&queue, departed, MAX_GROUPS);
     format_group_list(departed, count, buf, sizeof buf);
     printf("release_all -> %s\n", buf);
+    format_found(tito_get(&queue, "party-2"), buf, sizeof buf);
+    printf("get party-2 -> %s\n", buf);
     printf("len %d\n", tito_len(&queue));
 }
 
-/* Without strict order, ready party-4 leaves ahead of waiting party-3. */
+/* Without strict order, ready party-4 leaves ahead of waiting party-3.
+ *
+ * Taking back a member's readiness makes party-3 wait for it again. */
 static void relaxed_order_demo(void) {
     TitoQueue queue;
     Group released;
     Group departed[MAX_GROUPS];
+    Group *party3;
     char buf[MAX_MSG];
     int count;
 
@@ -472,7 +526,8 @@ static void relaxed_order_demo(void) {
     tito_init(&queue, 0);
     printf("strict_order %s\n", flag(queue.strict_order));
 
-    format_group(tito_admit(&queue, "party-3", party3_members, 2), buf, sizeof buf);
+    party3 = tito_admit(&queue, "party-3", party3_members, 2);
+    format_group(party3, buf, sizeof buf);
     printf("admit %s\n", buf);
     format_group(tito_admit(&queue, "party-4", party4_members, 1), buf, sizeof buf);
     printf("admit %s\n", buf);
@@ -487,6 +542,15 @@ static void relaxed_order_demo(void) {
     format_optional(tito_release(&queue, &released) ? &released : NULL, buf, sizeof buf);
     printf("release -> %s\n", buf);
     printf("mark_ready eli -> group ready %s\n", flag(tito_mark_ready(&queue, "eli") == 1));
+    tito_mark_waiting(&queue, "dee");
+    printf("mark_waiting dee\n");
+    print_state(party3);
+    format_optional(tito_release(&queue, &released) ? &released : NULL, buf, sizeof buf);
+    printf("release -> %s\n", buf);
+    group_mark_waiting(party3, "eli", queue.error, sizeof queue.error);
+    printf("party-3.mark_waiting eli\n");
+    print_state(party3);
+    printf("mark_group_ready party-3 -> %s\n", flag(tito_mark_group_ready(&queue, "party-3") == 0));
     count = tito_release_all(&queue, departed, MAX_GROUPS);
     format_group_list(departed, count, buf, sizeof buf);
     printf("release_all -> %s\n", buf);
@@ -548,10 +612,13 @@ static void error_demo(void) {
     report("admit party-9 [jay jay]", tito_admit(&queue, "party-9", jay_jay, 2) == NULL, queue.error);
     report("admit party-9 [kim]", tito_admit(&queue, "party-9", kim, 1) == NULL, queue.error);
     report("mark_ready zoe", tito_mark_ready(&queue, "zoe") < 0, queue.error);
+    report("mark_waiting zoe", tito_mark_waiting(&queue, "zoe") != 0, queue.error);
 
     party8 = tito_group_of(&queue, "kim");
     result = group_mark_ready(party8, "zoe", queue.error, sizeof queue.error);
     report("party-8.mark_ready zoe", result < 0, queue.error);
+    result = group_mark_waiting(party8, "zoe", queue.error, sizeof queue.error);
+    report("party-8.mark_waiting zoe", result != 0, queue.error);
 
     report("mark_group_ready party-9", tito_mark_group_ready(&queue, "party-9") != 0, queue.error);
     report("cancel party-9", tito_cancel(&queue, "party-9", &cancelled) != 0, queue.error);
